@@ -13,53 +13,37 @@
 
 pragma solidity >=0.8.0;
 
-import "hardhat/console.sol";
 import "./RLP.sol";
 import "./CoreTypes.sol";
 
 library MPT {
-    uint8 constant KEY_NIBBLES = 64;
-
     // prefix constants
     uint8 constant ODD_LENGTH = 1;
     uint8 constant LEAF = 2;
     uint8 constant MAX_PREFIX = 3;
 
     /**
-     * @notice Returns a nibble from a given 32-byte value
-     * @param data the value
-     * @param offset the nibble offset, should be 0-63
-     */
-    function getNibble(bytes32 data, uint256 offset) private pure returns (uint8 nibble) {
-        unchecked {
-            nibble = uint8(uint256(data) >> (252 - 4 * offset)) & 0xf;
-        }
-    }
-
-    /**
      * @notice Checks if the provided bytes match the key at a given offset
      * @param key the MPT key to check against
-     * @param keyOffset the current nibble offset into the key
+     * @param keyLen the length (in nibbles) of the key
      * @param testBytes the subkey to check
      */
     function subkeysEqual(
         bytes32 key,
-        uint256 keyOffset,
+        uint256 keyLen,
         bytes calldata testBytes
     ) private pure returns (bool result) {
         // arithmetic cannot overflow because testBytes is from calldata
-        // and keyOffset is <= 2 * a calldata string length
         uint256 nibbleLength;
         unchecked {
             nibbleLength = 2 * testBytes.length;
-            // ensure we have enough remaining key nibbles
-            require(nibbleLength + keyOffset <= KEY_NIBBLES);
+            require(nibbleLength <= keyLen);
         }
 
         assembly {
             let shiftAmount := sub(256, shl(2, nibbleLength))
             let testValue := shr(shiftAmount, calldataload(testBytes.offset))
-            let subkey := shr(shiftAmount, shl(shl(2, keyOffset), key))
+            let subkey := shr(shiftAmount, key)
             result := eq(testValue, subkey)
         }
     }
@@ -71,16 +55,20 @@ library MPT {
      *         Gas usage depends on both proof size and key nibble values.
      *         Gas usage for actual ethereum account proofs: ~ 30000 - 45000
      * @param proof the encoded MPT proof noodes concatenated
-     * @param key the 32-byte MPT key
+     * @param key the MPT key, padded with trailing 0s if needed
+     * @param keyLen the byte length of the MPT key, must be <= 32
      * @param rootHash the root hash of the MPT
      */
     function verifyTrieValue(
         bytes calldata proof,
         bytes32 key,
+        uint256 keyLen,
         bytes32 rootHash
     ) internal pure returns (bool exists, bytes calldata value) {
         bytes32 expectedHash = rootHash;
-        uint256 keyOffset = 0;
+
+        // we will read the key nibble by nibble, so double the length
+        keyLen *= 2;
 
         // initialize return values to make solc happy;
         // one will always be overwritten before returing
@@ -127,18 +115,20 @@ library MPT {
                     require(firstByte & 0xf == 0);
                 } else {
                     // second nibble is part of key
-                    keysMatch = keysMatch && (firstByte & 0xf) == getNibble(key, keyOffset);
+                    keysMatch = keysMatch && (firstByte & 0xf) == (uint8(bytes1(key)) >> 4);
                     unchecked {
-                        keyOffset++;
+                        key <<= 4;
+                        keyLen--;
                     }
                 }
 
                 // check the remainder of the encodedPath
                 encodedPath = encodedPath[1:];
-                keysMatch = keysMatch && subkeysEqual(key, keyOffset, encodedPath);
+                keysMatch = keysMatch && subkeysEqual(key, keyLen, encodedPath);
                 // cannot overflow because encodedPath is from calldata
                 unchecked {
-                    keyOffset += 2 * encodedPath.length;
+                    key <<= 8 * encodedPath.length;
+                    keyLen -= 2 * encodedPath.length;
                 }
 
                 if (prefix & LEAF == 0) {
@@ -148,7 +138,7 @@ library MPT {
                     (expectedHash, ) = CoreTypes.parseHash(node);
                 } else {
                     // leaf node, must have used all of key
-                    require(keyOffset == KEY_NIBBLES);
+                    require(keyLen == 0);
 
                     if (keysMatch) {
                         // if keys equal, we found the value
@@ -171,7 +161,7 @@ library MPT {
                 // fixed length 32-byte keys, so branch nodes never hold values
 
                 // fetch the branch for the next nibble of the key
-                uint256 keyNibble = getNibble(key, keyOffset);
+                uint256 keyNibble = uint256(uint8(bytes1(key)) >> 4);
 
                 // skip past the branches we don't need
                 // we already skipped past 2 elements; start there if we can
@@ -194,7 +184,8 @@ library MPT {
                     break;
                 }
                 unchecked {
-                    keyOffset++;
+                    key <<= 4;
+                    keyLen -= 1;
                 }
             }
         }

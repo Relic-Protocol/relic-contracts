@@ -5,17 +5,17 @@
 pragma solidity >=0.8.12;
 
 import "../RelicToken.sol";
-import "../ReliquaryWithFee.sol";
+import "../interfaces/IReliquary.sol";
 
 contract MockProver {
     FactSignature public immutable factSig;
-    ReliquaryWithFee immutable reliquary;
+    IReliquary immutable reliquary;
     RelicToken immutable token;
 
     constructor(
         uint8 factCls,
         bytes memory factDesc,
-        ReliquaryWithFee _reliquary,
+        IReliquary _reliquary,
         RelicToken _token
     ) {
         require(block.chainid == 31337, "testing only");

@@ -58,7 +58,20 @@ subtask(TASK_COMPILE_GET_COMPILATION_TASKS, "hooked to build yul verifier")
     return tasks;
   });
 
+
+// This is a sample Hardhat task. To learn how to create your own go to
+// https://hardhat.org/guides/create-task.html
+task("accounts", "Prints the list of accounts", async (taskArgs, hre) => {
+  const accounts = await hre.ethers.getSigners();
+
+  for (const account of accounts) {
+    console.log(account.address);
+  }
+});
+
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL || "";
+const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL || "";
+const SEPOLIA_PRIVKEY = process.env.SEPOLIA_PRIVKEY || "";
 
 /**
  * @type import("hardhat/config").HardhatUserConfig
@@ -73,7 +86,14 @@ module.exports = {
       }
     }
   },
+  mocha: {
+    timeout: 10000000
+  },
   networks: {
+     sepolia: {
+      url: SEPOLIA_RPC_URL,
+      accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
+    },
     hardhat: {
       forking: {
         url: MAINNET_RPC_URL,
@@ -82,11 +102,9 @@ module.exports = {
       saveDeployments: true,
     }
   },
-  mocha: {
-    timeout: 10000000
-  },
   namedAccounts: {
     deployer: {
+      // TODO: set deployer addresses for different networks
       default: 0
     }
   },

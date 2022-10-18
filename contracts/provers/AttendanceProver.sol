@@ -8,8 +8,9 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 
-import "../ReliquaryWithFee.sol";
+import "../interfaces/IReliquary.sol";
 import "../RelicToken.sol";
+import "../lib/FactSigs.sol";
 
 struct EventInfo {
     address signer;
@@ -24,7 +25,7 @@ struct EventInfo {
  *         to assign attendance Artifacts to accounts
  */
 contract AttendanceProver is Ownable {
-    ReliquaryWithFee immutable reliquary;
+    IReliquary immutable reliquary;
     RelicToken immutable token;
     address public outerSigner;
     mapping(uint64 => EventInfo) public events;
@@ -43,7 +44,7 @@ contract AttendanceProver is Ownable {
      * @param _reliquary The Reliquary in which this prover resides
      * @param _token The Artifact producer associated with this prover
      */
-    constructor(ReliquaryWithFee _reliquary, RelicToken _token) Ownable() {
+    constructor(IReliquary _reliquary, RelicToken _token) Ownable() {
         reliquary = _reliquary;
         token = _token;
     }
@@ -55,16 +56,6 @@ contract AttendanceProver is Ownable {
      */
     function setOuterSigner(address _outerSigner) external onlyOwner {
         outerSigner = _outerSigner;
-    }
-
-    /**
-     * @notice Produce a fact signature for a given event
-     * @param eventId The event in question
-     * @return A FactSignature with no verification fee for the event
-     */
-    function eventFactSig(uint64 eventId) public pure returns (FactSignature) {
-        return
-            Facts.toFactSignature(Facts.NO_FEE, abi.encode("EventAttendance", "EventID", eventId));
     }
 
     /**
@@ -94,7 +85,7 @@ contract AttendanceProver is Ownable {
         for (uint256 i = 0; i < capacity; i += 256) {
             eventInfo.claimed[i >> 8] = ~uint256(0);
         }
-        emit NewEvent(eventId, deadline, eventFactSig(eventId));
+        emit NewEvent(eventId, deadline, FactSigs.eventFactSig(eventId));
     }
 
     function increaseCapacity(uint64 eventId, uint32 newCapacity) external onlyOwner {
@@ -163,7 +154,7 @@ contract AttendanceProver is Ownable {
         oldslot &= ~(1 << bit);
         eventInfo.claimed[index] = oldslot;
 
-        FactSignature sig = eventFactSig(eventId);
+        FactSignature sig = FactSigs.eventFactSig(eventId);
         (bool proven, , ) = reliquary.getFact(account, sig);
         if (!proven) {
             bytes memory data = abi.encodePacked(

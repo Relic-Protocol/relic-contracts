@@ -1,0 +1,6 @@
+{
+    "semi": true,
+    "tabWidth": 4,
+    "printWidth": 100,
+    "compiler": "0.8.12"
+}

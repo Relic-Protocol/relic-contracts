@@ -30,6 +30,12 @@ library CoreTypes {
         bytes32 CodeHash;
     }
 
+    struct LogData {
+        address Address;
+        bytes32[] Topics;
+        bytes Data;
+    }
+
     function parseHash(bytes calldata buf) internal pure returns (bytes32 result, uint256 offset) {
         uint256 value;
         (value, offset) = RLP.parseUint(buf);
@@ -103,5 +109,72 @@ library CoreTypes {
         account = account[offset:];
         (data.CodeHash, offset) = parseHash(account); // CodeHash
         account = account[offset:];
+    }
+
+    function parseLog(bytes calldata log) internal pure returns (LogData memory data) {
+        (, uint256 offset) = RLP.parseList(log);
+        log = log[offset:];
+
+        uint256 tmp;
+        (tmp, offset) = RLP.parseUint(log); // Address
+        data.Address = address(uint160(tmp));
+        log = log[offset:];
+
+        (tmp, offset) = RLP.parseList(log); // Topics
+        bytes calldata topics = log[offset:offset + tmp];
+        log = log[offset + tmp:];
+        require(topics.length % 33 == 0);
+        data.Topics = new bytes32[](tmp / 33);
+        uint256 i = 0;
+        while (topics.length > 0) {
+            (data.Topics[i], offset) = parseHash(topics);
+            topics = topics[offset:];
+            unchecked {
+                i++;
+            }
+        }
+
+        (data.Data, ) = RLP.splitBytes(log);
+    }
+
+    function extractLog(bytes calldata receiptValue, uint256 logIdx)
+        internal
+        pure
+        returns (LogData memory)
+    {
+        // support EIP-2718: Currently all transaction types have the same
+        // receipt RLP format, so we can just skip the receipt type byte
+        if (receiptValue[0] < 0x80) {
+            receiptValue = receiptValue[1:];
+        }
+
+        (, uint256 offset) = RLP.parseList(receiptValue);
+        receiptValue = receiptValue[offset:];
+
+        // pre EIP-658, receipts stored an intermediate state root in this field
+        // post EIP-658, the field is a tx status (0 for failure, 1 for success)
+        uint256 statusOrIntermediateRoot;
+        (statusOrIntermediateRoot, offset) = RLP.parseUint(receiptValue);
+        require(statusOrIntermediateRoot != 0, "tx did not succeed");
+        receiptValue = receiptValue[offset:];
+
+        offset = RLP.skip(receiptValue); // GasUsed
+        receiptValue = receiptValue[offset:];
+
+        offset = RLP.skip(receiptValue); // LogsBloom
+        receiptValue = receiptValue[offset:];
+
+        uint256 length;
+        (length, offset) = RLP.parseList(receiptValue); // Logs
+        receiptValue = receiptValue[offset:offset + length];
+
+        // skip the earlier logs
+        for (uint256 i = 0; i < logIdx; i++) {
+            require(receiptValue.length > 0, "log index does not exist");
+            offset = RLP.skip(receiptValue);
+            receiptValue = receiptValue[offset:];
+        }
+
+        return parseLog(receiptValue);
     }
 }

@@ -5,7 +5,7 @@
 pragma solidity >=0.8.12;
 
 import "../BlockHistory.sol";
-import "../ReliquaryWithFee.sol";
+import "../interfaces/IReliquary.sol";
 import "../lib/CoreTypes.sol";
 import "../lib/RLP.sol";
 import "../lib/MPT.sol";
@@ -18,9 +18,9 @@ import "../lib/MPT.sol";
  */
 contract StateVerifier {
     BlockHistory public immutable blockHistory;
-    ReliquaryWithFee immutable reliquary;
+    IReliquary immutable reliquary;
 
-    constructor(BlockHistory _blockHistory, ReliquaryWithFee _reliquary) {
+    constructor(BlockHistory _blockHistory, IReliquary _reliquary) {
         blockHistory = _blockHistory;
         reliquary = _reliquary;
     }
@@ -71,7 +71,7 @@ contract StateVerifier {
 
         // validate the trie node and extract the value (if it exists)
         bytes calldata accountValue;
-        (exists, accountValue) = MPT.verifyTrieValue(proof, key, stateRoot);
+        (exists, accountValue) = MPT.verifyTrieValue(proof, key, 32, stateRoot);
         if (exists) {
             acc = CoreTypes.parseAccount(accountValue);
         }
@@ -86,24 +86,43 @@ contract StateVerifier {
      * @param slot the storage slot index
      * @param proof the MPT proof for the storage trie
      * @param storageRoot the MPT root hash for the storage trie
-     * @return exists whether the slot exists
-     * @return value the value in the storage slot
+     * @return value the value in the storage slot, as bytes, with leading 0 bytes removed
      */
     function verifyStorageSlot(
         bytes32 slot,
         bytes calldata proof,
         bytes32 storageRoot
-    ) internal pure returns (bool exists, bytes32 value) {
+    ) internal pure returns (bytes calldata value) {
         bytes32 key = keccak256(abi.encodePacked(slot));
 
-        // validate the trie node and extract the value (if it exists)
-        bytes calldata valueBytes;
-        (exists, valueBytes) = MPT.verifyTrieValue(proof, key, storageRoot);
+        // validate the trie node and extract the value (default is 0)
+        bool exists;
+        (exists, value) = MPT.verifyTrieValue(proof, key, 32, storageRoot);
         if (exists) {
-            (valueBytes, ) = RLP.splitBytes(valueBytes);
-            require(valueBytes.length == 32);
-            value = bytes32(valueBytes);
+            (value, ) = RLP.splitBytes(value);
+            require(value.length <= 32);
         }
+    }
+
+    /**
+     * @notice verifies that the receipt is included in the receipts trie using
+     *         the provided proof. Accepts both existence and nonexistence
+     *         proofs. Reverts if the proof is invalid. Assumes the receiptsRoot
+     *         comes from a valid Ethereum block header.
+     *
+     * @param idx the receipt index in the block
+     * @param proof the MPT proof for the storage trie
+     * @param receiptsRoot the MPT root hash for the storage trie
+     * @return exists whether the receipt index exists
+     * @return value the value in the storage slot, as bytes, with leading 0 bytes removed
+     */
+    function verifyReceipt(
+        uint256 idx,
+        bytes calldata proof,
+        bytes32 receiptsRoot
+    ) internal pure returns (bool exists, bytes calldata value) {
+        bytes memory key = RLP.encodeUint(idx);
+        (exists, value) = MPT.verifyTrieValue(proof, bytes32(key), key.length, receiptsRoot);
     }
 
     /**
@@ -135,5 +154,35 @@ contract StateVerifier {
     {
         head = verifyBlockHeader(header, blockProof);
         (exists, acc) = verifyAccount(account, accountProof, head.Root);
+    }
+
+    /**
+     * @notice verifies a log was emitted in the given block, txIdx, and logIdx
+     *         using the provided proofs. Reverts if the log doesn't exist or if
+     *         the proofs are invalid.
+     *
+     * @param txIdx the transaction index in the block
+     * @param logIdx the index of the log in the transaction
+     * @param receiptProof the Merkle-Patricia trie proof for the receipt
+     * @param header the block header, RLP encoded
+     * @param blockProof proof that the block header is valid
+     * @return head the parsed block header
+     * @return log the parsed log value
+     */
+    function verifyLogAtBlock(
+        uint256 txIdx,
+        uint256 logIdx,
+        bytes calldata receiptProof,
+        bytes calldata header,
+        bytes calldata blockProof
+    ) internal view returns (CoreTypes.BlockHeaderData memory head, CoreTypes.LogData memory log) {
+        head = verifyBlockHeader(header, blockProof);
+        (bool exists, bytes calldata receiptValue) = verifyReceipt(
+            txIdx,
+            receiptProof,
+            head.ReceiptHash
+        );
+        require(exists, "receipt does not exist");
+        log = CoreTypes.extractLog(receiptValue, logIdx);
     }
 }

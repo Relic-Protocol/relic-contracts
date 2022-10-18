@@ -4,10 +4,11 @@
 
 pragma solidity >=0.8.12;
 
-import "../ReliquaryWithFee.sol";
+import "../interfaces/IReliquary.sol";
 import "../RelicToken.sol";
 import "../BlockHistory.sol";
 import "./StateVerifier.sol";
+import "../lib/FactSigs.sol";
 
 /**
  * @title BirthCertificateProver
@@ -21,10 +22,10 @@ contract BirthCertificateProver is StateVerifier {
 
     constructor(
         BlockHistory blockHistory,
-        ReliquaryWithFee _reliquary,
+        IReliquary _reliquary,
         RelicToken _token
     ) StateVerifier(blockHistory, _reliquary) {
-        BIRTH_CERTIFICATE_SIG = Facts.toFactSignature(Facts.NO_FEE, abi.encode("BirthCertificate"));
+        BIRTH_CERTIFICATE_SIG = FactSigs.birthCertificateFactSig();
         token = _token;
     }
 

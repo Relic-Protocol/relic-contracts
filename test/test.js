@@ -271,6 +271,12 @@ describe("Blocks", function () {
 })
 
 describe("Reliquary", function () {
+    const MERKLE_TREE_DEPTH = 13;
+    const BLOCKS_PER_CHUNK = 2 ** MERKLE_TREE_DEPTH;
+    const targetBlock = config.networks.hardhat.forking.blockNumber - BLOCKS_PER_CHUNK;
+    expect(targetBlock % BLOCKS_PER_CHUNK).to.equal(0);
+    const preByzantiumBlock = 4369999;
+
     async function fixture(_wallets, _provider) {
         const Reliquary = await ethers.getContractFactory("ReliquaryWithFee");
         const reliquary = await Reliquary.deploy();
@@ -314,22 +320,71 @@ describe("Reliquary", function () {
         const blockHistory = await BlockHistory.deploy([], [], reliquary.address);
         await blockHistory.deployed();
 
-        const AccToken = await ethers.getContractFactory("BirthCertificateRelic");
-        const accToken = await AccToken.deploy(reliquary.address);
-        await accToken.deployed();
+        // setup merkle root and proof for testing
+        block = await ethers.provider.getBlock(targetBlock);
+
+        // real hashes for targetBlock ... targetBlock+2; fake hashes for rest
+        let hashes = new Array(BLOCKS_PER_CHUNK).fill(block.hash);
+        hashes[1] = (await ethers.provider.getBlock(targetBlock + 1)).hash;
+        hashes[2] = (await ethers.provider.getBlock(targetBlock + 2)).hash;
+        const root = buildMerkleRoot(hashes);
+
+        block = await ethers.provider.getBlock(preByzantiumBlock);
+        // real hashes for preByzantiumBlock; fake hashes for rest
+        let preByzantiumHashes = new Array(BLOCKS_PER_CHUNK).fill(block.hash);
+        const preByzantiumRoot = buildMerkleRoot(preByzantiumHashes);
+
+        // setup merkle roots used in tests
+        tx = await blockHistory.storeMerkleRootsForTesting(targetBlock / BLOCKS_PER_CHUNK, [root]);
+        await tx.wait()
+
+        tx = await blockHistory.storeMerkleRootsForTesting(Math.floor(preByzantiumBlock / BLOCKS_PER_CHUNK), [preByzantiumRoot]);
+        await tx.wait()
+
+        const BCToken = await ethers.getContractFactory("BirthCertificateRelic");
+        const bcToken = await BCToken.deploy(reliquary.address);
+        await bcToken.deployed();
 
         const BCProver = await ethers.getContractFactory("BirthCertificateProver");
-        const bcProver = await BCProver.deploy(blockHistory.address, reliquary.address, accToken.address);
+        const bcProver = await BCProver.deploy(blockHistory.address, reliquary.address, bcToken.address);
         await bcProver.deployed();
 
-        tx = await accToken.setProver(bcProver.address, true);
+        tx = await bcToken.setProver(bcProver.address, true);
         await tx.wait();
 
-        return { reliquary, mockToken, mockProver, aToken, aProver, accToken, bcProver, urier };
+        const SSProver = await ethers.getContractFactory("StorageSlotProver");
+        const ssProver = await SSProver.deploy(blockHistory.address, reliquary.address);
+        await ssProver.deployed();
+
+        async function getProofs(blockNum, account, slots) {
+            // use the base provider to fetch trie proofs, because hardhat doesn't support it
+            const baseProvider = new ethers.providers.JsonRpcProvider(config.networks.hardhat.forking.url);
+            const res = await baseProvider.send("eth_getProof", [account, slots, "0x" + blockNum.toString(16)]);
+
+            // concatenate proof nodes
+            const accountProof = "0x".concat(...res.accountProof.map((n) => n.substring(2)));
+
+            let blockProof;
+            if (blockNum >= targetBlock) {
+                blockProof = encodeValidBlockMerkleProof(true, buildMerkleProof(hashes, blockNum - targetBlock));
+            } else if (blockNum == preByzantiumBlock) {
+                blockProof = encodeValidBlockMerkleProof(true, buildMerkleProof(preByzantiumHashes, preByzantiumBlock % BLOCKS_PER_CHUNK));
+            }
+            const rawHeader = await baseProvider.send("eth_getBlockByNumber", ["0x" + blockNum.toString(16), false]);
+            const headerRLP = headerRlp(rawHeader);
+            let slotProofs = {};
+            res.storageProof.forEach((sp) => {
+                slotProofs[sp.key] = "0x".concat(...sp.proof.map((n) => n.substring(2)));
+            });
+
+            return {accountProof, headerRLP, blockProof, slotProofs};
+        }
+
+        return { reliquary, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, urier, getProofs };
     }
 
     async function fixtureAddProverValid(_wallets, _provider) {
-        const { reliquary, mockToken, mockProver, aToken, aProver, accToken, bcProver, urier } = await loadFixture(fixture);
+        const { reliquary, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, urier, getProofs } = await loadFixture(fixture);
 
         await reliquary.grantRole(await reliquary.ADD_PROVER_ROLE(), addr0);
 
@@ -360,6 +415,11 @@ describe("Reliquary", function () {
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("PendingProverAdded");
 
+        tx = await reliquary.addProver(ssProver.address, 4);
+        receipt = await tx.wait();
+        expect(receipt.events.length).equals(1);
+        expect(receipt.events[0].event).equals("PendingProverAdded");
+
         await expect(
             reliquary.activateProver(bcProver.address)
         ).to.be.revertedWith("not ready");
@@ -370,6 +430,11 @@ describe("Reliquary", function () {
         ).to.be.revertedWith("duplicate prover");
 
         tx = await reliquary.activateProver(bcProver.address);
+        receipt = await tx.wait();
+        expect(receipt.events.length).equals(1);
+        expect(receipt.events[0].event).equals("NewProver");
+
+        tx = await reliquary.activateProver(ssProver.address);
         receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("NewProver");
@@ -400,7 +465,15 @@ describe("Reliquary", function () {
             feeExternalId: 0
         }, ZERO_ADDR)
 
-        return { reliquary, mockToken, mockProver, aToken, aProver, accToken, bcProver, urier };
+        await reliquary.setProverFee(ssProver.address, {
+            flags: 0x1, // none
+            feeCredits: 0,
+            feeWeiMantissa: 0,
+            feeWeiExponent: 0,
+            feeExternalId: 0
+        }, ZERO_ADDR)
+
+        return { reliquary, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, urier, getProofs };
     }
 
     async function fixtureAddProverShortWait(_wallets, _provider) {
@@ -435,7 +508,7 @@ describe("Reliquary", function () {
             reliquary.addProver(mockProver.address, 1)
         ).to.be.revertedWith("duplicate version");
         await expect(
-            reliquary.addProver(mockProver.address, 4)
+            reliquary.addProver(mockProver.address, 1337)
         ).to.be.revertedWith("duplicate prover");
 
 
@@ -444,7 +517,7 @@ describe("Reliquary", function () {
         const mockProver2 = await MockProver.deploy(factCls, factsig0, reliquary.address, mockToken.address);
         await mockProver2.deployed();
 
-        let tx = await reliquary.addProver(mockProver2.address, 4);
+        let tx = await reliquary.addProver(mockProver2.address, 1337);
         let receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("PendingProverAdded");
@@ -631,7 +704,7 @@ describe("Reliquary", function () {
     })
 
     it("test attendance", async function () {
-        const { reliquary, mockToken, mockProver, aToken, aProver, accToken, bcProver, urier } = await loadFixture(fixtureAddProverValid);
+        const { reliquary, mockToken, mockProver, aToken, aProver, bcToken, bcProver, urier } = await loadFixture(fixtureAddProverValid);
 
         let signer = await ethers.getSigner(addr0);
 
@@ -767,44 +840,8 @@ describe("Reliquary", function () {
         ).to.be.revertedWith("already claimed");
     })
 
-    it("test birth certificate", async function () {
-        const { reliquary, mockToken, mockProver, aToken, aProver, accToken, bcProver, urier } = await loadFixture(fixtureAddProverValid);
-
-        const BlockHistory = await ethers.getContractFactory("BlockHistoryForTesting");
-        const blockHistory = BlockHistory.attach(await bcProver.blockHistory());
-
-        // setup merkle root and proof for testing
-        const MERKLE_TREE_DEPTH = 13;
-        const BLOCKS_PER_CHUNK = 2 ** MERKLE_TREE_DEPTH;
-        const targetBlock = config.networks.hardhat.forking.blockNumber - BLOCKS_PER_CHUNK;
-        expect(targetBlock % BLOCKS_PER_CHUNK).to.equal(0);
-
-        let block = await ethers.provider.getBlock(targetBlock);
-
-        // real hashes for targetBlock ... targetBlock+2; fake hashes for rest
-        let hashes = new Array(BLOCKS_PER_CHUNK).fill(block.hash);
-        hashes[1] = (await ethers.provider.getBlock(targetBlock + 1)).hash;
-        hashes[2] = (await ethers.provider.getBlock(targetBlock + 2)).hash;
-        const root = buildMerkleRoot(hashes);
-        let tx = await blockHistory.storeMerkleRootsForTesting(targetBlock / BLOCKS_PER_CHUNK, [root]);
-        await tx.wait()
-
-        async function getProofs(blockNum, account, slots) {
-            expect(blockNum >= targetBlock && blockNum < targetBlock + BLOCKS_PER_CHUNK).to.equal(true);
-
-            // use the base provider to fetch trie proofs, because hardhat doesn't support it
-            const baseProvider = new ethers.providers.JsonRpcProvider(config.networks.hardhat.forking.url);
-            const res = await baseProvider.send("eth_getProof", [account, slots, "0x" + blockNum.toString(16)]);
-
-            // concatenate proof nodes
-            const accountProof = "0x".concat(...res.accountProof.map((p) => p.substring(2)));
-
-            const blockProof = encodeValidBlockMerkleProof(true, buildMerkleProof(hashes, blockNum - targetBlock));
-            const rawHeader = await baseProvider.send("eth_getBlockByNumber", ["0x" + blockNum.toString(16), false]);
-            const headerRLP = headerRlp(rawHeader);
-
-            return [accountProof, headerRLP, blockProof];
-        }
+    it("test storage slots", async function () {
+        const { reliquary, ssProver, getProofs } = await loadFixture(fixtureAddProverValid);
 
         const WETH = new ethers.Contract(
             "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
@@ -812,50 +849,76 @@ describe("Reliquary", function () {
             ethers.provider
         );
 
-        /*
         // compute storage slot of WETH.balanceOf(WETH)
         const BALANCE_MAP = 3;
         const slot = keccak256(defaultAbiCoder.encode(["address", "uint256"], [WETH.address, BALANCE_MAP]));
-        const expectedSlotVal = await WETH.balanceOf(WETH.address);
-        expect(ethers.BigNumber.from(res.storageProof[0].value)).to.equal(expectedSlotVal);
-        */
 
-        // prove targetBlock + 1
-        let [accountProof, header, blockProof] = await getProofs(targetBlock + 1, WETH.address, [/*slot*/]);
-        tx = await bcProver.proveBirthCertificate(WETH.address, accountProof, header, blockProof);
-        await tx.wait();
-
-        // check proving later block reverts
-        [accountProof, header, blockProof] = await getProofs(targetBlock + 2, WETH.address, [/*slot*/]);
-        await expect(
-            bcProver.proveBirthCertificate(WETH.address, accountProof, header, blockProof)
-        ).to.be.revertedWith("older block already proven");
-
-        // check proving earlier block succeeds
-        [accountProof, header, blockProof] = await getProofs(targetBlock, WETH.address, [/*slot*/]);
-        tx = await bcProver.proveBirthCertificate(WETH.address, accountProof, header, blockProof);
+        // check proving slot works
+        let {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, WETH.address, [slot]);
+        tx = await ssProver.proveAndStoreStorageSlot(WETH.address, accountProof, slot, slotProofs[slot], headerRLP, blockProof);
         await tx.wait();
 
         // check proving the wrong account block fails
-        [accountProof, header, blockProof] = await getProofs(targetBlock, "0xD" + WETH.address.substring(3), [/*slot*/]);
+        const fakeAddr = WETH.address.replace("C", "D").toLowerCase();
+        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, fakeAddr, [slot]);
         await expect(
-            bcProver.proveBirthCertificate(WETH.address, accountProof, header, blockProof)
+            ssProver.proveAndStoreStorageSlot(WETH.address, accountProof, slot, slotProofs[slot], headerRLP, blockProof)
         ).to.be.revertedWith("node hash incorrect");
 
+        // check proving a missing slot succeeds (value should be 0)
+        const emptySlot = keccak256(defaultAbiCoder.encode(["address", "uint256"], [fakeAddr, BALANCE_MAP]));
+        expect(await WETH.balanceOf(fakeAddr)).to.equal(0);
+
+        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, WETH.address, [emptySlot]);
+        tx = await ssProver.proveAndStoreStorageSlot(WETH.address, accountProof, emptySlot, slotProofs[emptySlot], headerRLP, blockProof);
+        await tx.wait();
+    })
+
+
+    it("test birth certificate", async function () {
+        const { reliquary, bcToken, bcProver, urier, getProofs } = await loadFixture(fixtureAddProverValid);
+
+        const WETH = new ethers.Contract(
+            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            ["function balanceOf(address) view returns (uint256)"],
+            ethers.provider
+        );
+
+        // prove targetBlock + 1
+        let {accountProof, headerRLP, blockProof} = await getProofs(targetBlock + 1, WETH.address, []);
+        tx = await bcProver.proveBirthCertificate(WETH.address, accountProof, headerRLP, blockProof);
+        await tx.wait();
+
+        // check proving later block reverts
+        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock + 2, WETH.address, []);
+        await expect(
+            bcProver.proveBirthCertificate(WETH.address, accountProof, headerRLP, blockProof)
+        ).to.be.revertedWith("older block already proven");
+
+        // check proving earlier block succeeds
+        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address, []);
+        tx = await bcProver.proveBirthCertificate(WETH.address, accountProof, headerRLP, blockProof);
+        await tx.wait();
+
+        // check proving the wrong account block fails
+        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
+        await expect(
+            bcProver.proveBirthCertificate(WETH.address, accountProof, headerRLP, blockProof)
+        ).to.be.revertedWith("node hash incorrect");
 
         // check proving an empty account fails
-        [accountProof, header, blockProof] = await getProofs(targetBlock, "0xD" + WETH.address.substring(3), [/*slot*/]);
+        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
         await expect(
-            bcProver.proveBirthCertificate(("0xD" + WETH.address.substring(3)).toLowerCase(), accountProof, header, blockProof)
+            bcProver.proveBirthCertificate((WETH.address.replace("C", "D")).toLowerCase(), accountProof, headerRLP, blockProof)
         ).to.be.revertedWith("Account does not exist at block");
 
-        await expect(accToken.addURIProvider(urier.address, 0)).to.not.be.reverted;
+        await expect(bcToken.addURIProvider(urier.address, 0)).to.not.be.reverted;
         expect(
-            await accToken.tokenURI(ethers.utils.solidityPack(["uint64", "address"], [0, WETH.address]))
+            await bcToken.tokenURI(ethers.utils.solidityPack(["uint64", "address"], [0, WETH.address]))
         ).contains("data:application/json;base64");
 
-        expect(await accToken.name()).equal("Birth Certificate Relic");
-        expect(await accToken.symbol()).equal("BCR");
+        expect(await bcToken.name()).equal("Birth Certificate Relic");
+        expect(await bcToken.symbol()).equal("BCR");
     })
 
     it("test valid block hash fee", async function () {

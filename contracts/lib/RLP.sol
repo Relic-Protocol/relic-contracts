@@ -99,7 +99,7 @@ library RLP {
                             size := add(1, sub(kind, 0xC0))
                         }
                         case false {
-                            let lengthSize := sub(kind, 0xB7)
+                            let lengthSize := sub(kind, 0xF7)
 
                             // ensure that we don't overflow
                             if gt(lengthSize, 31) {
@@ -214,5 +214,66 @@ library RLP {
             result = buf[offset:offset + size];
             rest = buf[offset + size:];
         }
+    }
+
+    function encodeUint(uint256 value) internal pure returns (bytes memory) {
+        // allocate our result bytes
+        bytes memory result = new bytes(33);
+
+        if (value == 0) {
+            // store length = 1, value = 0x80
+            assembly {
+                mstore(add(result, 1), 0x180)
+            }
+            return result;
+        }
+
+        if (value < 128) {
+            // store length = 1, value = value
+            assembly {
+                mstore(add(result, 1), or(0x100, value))
+            }
+            return result;
+        }
+
+        if (value > 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) {
+            // length 33, prefix 0xa0 followed by value
+            assembly {
+                mstore(add(result, 1), 0x21a0)
+                mstore(add(result, 33), value)
+            }
+            return result;
+        }
+
+        if (value > 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) {
+            // length 32, prefix 0x9f followed by value
+            assembly {
+                mstore(add(result, 1), 0x209f)
+                mstore(add(result, 33), shl(8, value))
+            }
+            return result;
+        }
+
+        assembly {
+            let length := 1
+            for {
+                let min := 0x100
+            } lt(sub(min, 1), value) {
+                min := shl(8, min)
+            } {
+                length := add(length, 1)
+            }
+
+            let bytesLength := add(length, 1)
+
+            // bytes length field
+            let hi := shl(mul(bytesLength, 8), bytesLength)
+
+            // rlp encoding of value
+            let lo := or(shl(mul(length, 8), add(length, 0x80)), value)
+
+            mstore(add(result, bytesLength), or(hi, lo))
+        }
+        return result;
     }
 }

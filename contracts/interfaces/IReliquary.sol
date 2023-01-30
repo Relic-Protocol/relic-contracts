@@ -144,14 +144,7 @@ interface IReliquary {
 
     function pendingProvers(address) external view returns (uint64 timestamp, uint64 version);
 
-    function provers(address)
-        external
-        view
-        returns (
-            uint64 version,
-            FeeInfo memory feeInfo,
-            bool revoked
-        );
+    function provers(address) external view returns (ProverInfo memory);
 
     function removeCredits(address user, uint192 amount) external;
 

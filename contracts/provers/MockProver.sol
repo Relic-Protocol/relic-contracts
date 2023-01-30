@@ -4,39 +4,45 @@
 
 pragma solidity >=0.8.12;
 
+import "./Prover.sol";
 import "../RelicToken.sol";
 import "../interfaces/IReliquary.sol";
 
-contract MockProver {
+contract MockProver is Prover {
     FactSignature public immutable factSig;
-    IReliquary immutable reliquary;
     RelicToken immutable token;
+
+    struct MockProof {
+        address account;
+        uint48 blockNum;
+    }
 
     constructor(
         uint8 factCls,
         bytes memory factDesc,
         IReliquary _reliquary,
         RelicToken _token
-    ) {
+    ) Prover(_reliquary) {
         require(block.chainid == 31337, "testing only");
         factSig = Facts.toFactSignature(factCls, factDesc);
-        reliquary = _reliquary;
         token = _token;
     }
 
-    function proveFact(address account, uint48 blockNum) external payable {
-        reliquary.checkProveFactFee{value: msg.value}(msg.sender);
-
-        reliquary.setFact(account, factSig, abi.encodePacked(blockNum));
+    function parseMockProof(bytes calldata proof) internal pure returns (MockProof calldata res) {
+        assembly {
+            res := proof.offset
+        }
     }
 
-    function proveFactWithNFT(address account, uint48 blockNum) external payable {
-        reliquary.checkProveFactFee{value: msg.value}(msg.sender);
+    function _prove(bytes calldata encodedProof) internal view override returns (Fact memory) {
+        MockProof memory proof = parseMockProof(encodedProof);
+        bytes memory data = abi.encodePacked(proof.blockNum);
+        return Fact(proof.account, factSig, data);
+    }
 
-        (bool proven, , ) = reliquary.getFact(account, factSig);
-        reliquary.setFact(account, factSig, abi.encodePacked(blockNum));
-        if (!proven) {
-            token.mint(account, 0);
+    function _afterStore(Fact memory fact, bool alreadyStored) internal override {
+        if (!alreadyStored) {
+            token.mint(fact.account, 0);
         }
     }
 }

@@ -15,11 +15,15 @@ import "./RLP.sol";
 library CoreTypes {
     struct BlockHeaderData {
         bytes32 ParentHash;
+        address Coinbase;
         bytes32 Root;
         bytes32 TxHash;
         bytes32 ReceiptHash;
         uint256 Number;
+        uint256 GasLimit;
+        uint256 GasUsed;
         uint256 Time;
+        bytes32 MixHash;
         uint256 BaseFee;
     }
 
@@ -42,6 +46,16 @@ library CoreTypes {
         result = bytes32(value);
     }
 
+    function parseAddress(bytes calldata buf)
+        internal
+        pure
+        returns (address result, uint256 offset)
+    {
+        uint256 value;
+        (value, offset) = RLP.parseUint(buf);
+        result = address(uint160(value));
+    }
+
     function parseBlockHeader(bytes calldata header)
         internal
         pure
@@ -54,7 +68,7 @@ library CoreTypes {
         header = header[offset:];
         offset = RLP.skip(header); // UncleHash
         header = header[offset:];
-        offset = RLP.skip(header); // Coinbase
+        (data.Coinbase, offset) = parseAddress(header); // Coinbase
         header = header[offset:];
         (data.Root, offset) = parseHash(header); // Root
         header = header[offset:];
@@ -68,15 +82,15 @@ library CoreTypes {
         header = header[offset:];
         (data.Number, offset) = RLP.parseUint(header); // Number
         header = header[offset:];
-        offset = RLP.skip(header); // GasLimit
+        (data.GasLimit, offset) = RLP.parseUint(header); // GasLimit
         header = header[offset:];
-        offset = RLP.skip(header); // GasUsed
+        (data.GasUsed, offset) = RLP.parseUint(header); // GasUsed
         header = header[offset:];
         (data.Time, offset) = RLP.parseUint(header); // Time
         header = header[offset:];
         offset = RLP.skip(header); // Extra
         header = header[offset:];
-        offset = RLP.skip(header); // MixDigest
+        (data.MixHash, offset) = parseHash(header); // MixHash
         header = header[offset:];
         offset = RLP.skip(header); // Nonce
         header = header[offset:];

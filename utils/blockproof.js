@@ -87,6 +87,10 @@ function headerRlp(header) {
     }
 
     list = list.map((v) => {
+        if (v == "0x0") {
+            return "0x";
+        }
+
         if (v.length % 2 == 0) {
             return v;
         } else {

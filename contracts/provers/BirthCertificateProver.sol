@@ -8,6 +8,7 @@ import "../interfaces/IReliquary.sol";
 import "../RelicToken.sol";
 import "../BlockHistory.sol";
 import "./StateVerifier.sol";
+import "./Prover.sol";
 import "../lib/FactSigs.sol";
 
 /**
@@ -16,46 +17,55 @@ import "../lib/FactSigs.sol";
  * @notice BirthCertificateProver proves that an account existed in a given block
  *         and stores the oldest known account proof in the fact database
  */
-contract BirthCertificateProver is StateVerifier {
+contract BirthCertificateProver is Prover, StateVerifier {
     FactSignature public immutable BIRTH_CERTIFICATE_SIG;
     RelicToken immutable token;
+
+    struct AccountProof {
+        address account;
+        bytes accountProof;
+        bytes header;
+        bytes blockProof;
+    }
 
     constructor(
         BlockHistory blockHistory,
         IReliquary _reliquary,
         RelicToken _token
-    ) StateVerifier(blockHistory, _reliquary) {
+    ) Prover(_reliquary) StateVerifier(blockHistory, _reliquary) {
         BIRTH_CERTIFICATE_SIG = FactSigs.birthCertificateFactSig();
         token = _token;
     }
 
-    /**
-     * @notice Proves that an account existed in the given block. Stores the
-     *         fact in the registry if the given block is the oldest block
-     *         this account is known to exist in.
-     *
-     * @param account the account to prove exists
-     * @param accountProof the Merkle-Patricia trie proof for the account
-     * @param header the block header, RLP encoded
-     * @param blockProof proof that the block header is valid
-     */
-    function proveBirthCertificate(
-        address account,
-        bytes calldata accountProof,
-        bytes calldata header,
-        bytes calldata blockProof
-    ) external payable {
-        reliquary.checkProveFactFee{value: msg.value}(msg.sender);
+    function parseAccountProof(bytes calldata proof)
+        internal
+        pure
+        returns (AccountProof calldata res)
+    {
+        assembly {
+            res := proof.offset
+        }
+    }
 
+    /**
+     * @notice Proves that an account existed in the given block
+     *
+     * @param encodedProof the encoded AccountProof
+     */
+    function _prove(bytes calldata encodedProof) internal view override returns (Fact memory) {
+        AccountProof calldata proof = parseAccountProof(encodedProof);
         (bool exists, CoreTypes.BlockHeaderData memory head, ) = verifyAccountAtBlock(
-            account,
-            accountProof,
-            header,
-            blockProof
+            proof.account,
+            proof.accountProof,
+            proof.header,
+            proof.blockProof
         );
         require(exists, "Account does not exist at block");
 
-        (bool proven, , bytes memory data) = reliquary.getFact(account, BIRTH_CERTIFICATE_SIG);
+        (bool proven, , bytes memory data) = reliquary.getFact(
+            proof.account,
+            BIRTH_CERTIFICATE_SIG
+        );
 
         if (proven) {
             uint48 blockNum = uint48(bytes6(data));
@@ -63,10 +73,17 @@ contract BirthCertificateProver is StateVerifier {
         }
 
         data = abi.encodePacked(uint48(head.Number), uint64(head.Time));
-        reliquary.setFact(account, BIRTH_CERTIFICATE_SIG, data);
+        return Fact(proof.account, BIRTH_CERTIFICATE_SIG, data);
+    }
 
-        if (!proven) {
-            token.mint(account, 0);
+    /**
+     * @notice handles minting the token after a fact is stored
+     *
+     * @param fact the fact which was stored
+     */
+    function _afterStore(Fact memory fact, bool alreadyStored) internal override {
+        if (!alreadyStored) {
+            token.mint(fact.account, 0);
         }
     }
 }

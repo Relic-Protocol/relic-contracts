@@ -12,30 +12,27 @@ import "./StateVerifier.sol";
 import "../lib/FactSigs.sol";
 
 /**
- * @title StorageSlotProver
+ * @title AccountStorageProver
  * @author Theori, Inc.
- * @notice StorageSlotProver proves that a storage slot had a particular value
- *         at a particular block.
+ * @notice AccountStorageProver proves an account's storage root at a particular block
  */
-contract StorageSlotProver is Prover, StateVerifier {
+contract AccountStorageProver is Prover, StateVerifier {
     constructor(BlockHistory blockHistory, IReliquary _reliquary)
         Prover(_reliquary)
         StateVerifier(blockHistory, _reliquary)
     {}
 
-    struct StorageSlotProof {
+    struct AccountStorageProof {
         address account;
         bytes accountProof;
-        bytes32 slot;
-        bytes slotProof;
         bytes header;
         bytes blockProof;
     }
 
-    function parseStorageSlotProof(bytes calldata proof)
+    function parseAccountStorageProof(bytes calldata proof)
         internal
         pure
-        returns (StorageSlotProof calldata res)
+        returns (AccountStorageProof calldata res)
     {
         assembly {
             res := proof.offset
@@ -45,10 +42,10 @@ contract StorageSlotProver is Prover, StateVerifier {
     /**
      * @notice Proves that a storage slot had a particular value at a particular block.
      *
-     * @param encodedProof the encoded StorageSlotProof
+     * @param encodedProof the encoded AccountStorageProof
      */
     function _prove(bytes calldata encodedProof) internal view override returns (Fact memory) {
-        StorageSlotProof calldata proof = parseStorageSlotProof(encodedProof);
+        AccountStorageProof calldata proof = parseAccountStorageProof(encodedProof);
         (
             bool exists,
             CoreTypes.BlockHeaderData memory head,
@@ -56,7 +53,7 @@ contract StorageSlotProver is Prover, StateVerifier {
         ) = verifyAccountAtBlock(proof.account, proof.accountProof, proof.header, proof.blockProof);
         require(exists, "Account does not exist at block");
 
-        bytes memory value = verifyStorageSlot(proof.slot, proof.slotProof, acc.StorageRoot);
-        return Fact(proof.account, FactSigs.storageSlotFactSig(proof.slot, head.Number), value);
+        return
+            Fact(proof.account, FactSigs.accountStorageFactSig(head.Number, acc.StorageRoot), "");
     }
 }

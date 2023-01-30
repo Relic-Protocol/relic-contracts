@@ -6,6 +6,12 @@ pragma solidity >=0.8.12;
 
 type FactSignature is bytes32;
 
+struct Fact {
+    address account;
+    FactSignature sig;
+    bytes data;
+}
+
 library Facts {
     uint8 internal constant NO_FEE = 0;
 

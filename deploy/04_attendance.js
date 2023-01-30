@@ -10,6 +10,7 @@ module.exports = async ({getNamedAccounts, deployments}) => {
         from: deployer,
         args: [reliquary.address],
         log: true,
+        skipIfAlreadyDeployed: true,
     });
     const token = await ethers.getContract("AttendanceArtifact");
 
@@ -22,4 +23,3 @@ module.exports = async ({getNamedAccounts, deployments}) => {
 
 module.exports.tags = ["Attendance"];
 module.exports.dependencies = ["Reliquary"];
-

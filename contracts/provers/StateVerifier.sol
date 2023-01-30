@@ -18,7 +18,7 @@ import "../lib/MPT.sol";
  */
 contract StateVerifier {
     BlockHistory public immutable blockHistory;
-    IReliquary immutable reliquary;
+    IReliquary private immutable reliquary;
 
     constructor(BlockHistory _blockHistory, IReliquary _reliquary) {
         blockHistory = _blockHistory;

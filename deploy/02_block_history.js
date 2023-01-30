@@ -12,6 +12,7 @@ module.exports = async ({getNamedAccounts, deployments}) => {
         from: deployer,
         args: [sizes, verifiers, Reliquary.address],
         log: true,
+        skipIfAlreadyDeployed: true,
     });
 };
 module.exports.tags = ["BlockHistory"];

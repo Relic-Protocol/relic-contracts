@@ -6,20 +6,12 @@ module.exports = async ({getNamedAccounts, deployments}) => {
     const reliquary = await ethers.getContract("Reliquary");
     const blockHistory = await ethers.getContract("BlockHistory");
 
-    await deploy("BirthCertificateRelic", {
+    await deploy("CachedStorageSlotProver", {
         from: deployer,
-        args: [reliquary.address],
-        log: true,
-        skipIfAlreadyDeployed: true,
-    });
-    const token = await ethers.getContract("BirthCertificateRelic");
-
-    await deploy("BirthCertificateProver", {
-        from: deployer,
-        args: [blockHistory.address, reliquary.address, token.address],
+        args: [blockHistory.address, reliquary.address],
         log: true,
     });
 };
 
-module.exports.tags = ["BirthCertificate"];
+module.exports.tags = ["CachedStorageSlotProver"];
 module.exports.dependencies = ["Reliquary", "BlockHistory"];

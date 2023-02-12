@@ -6,6 +6,7 @@ pragma solidity >=0.8.12;
 
 import "../BlockHistory.sol";
 import "../interfaces/IReliquary.sol";
+import "../lib/BytesCalldata.sol";
 import "../lib/CoreTypes.sol";
 import "../lib/RLP.sol";
 import "../lib/MPT.sol";
@@ -17,6 +18,8 @@ import "../lib/MPT.sol";
  *         state using BlockHistory proofs and MPT proofs.
  */
 contract StateVerifier {
+    using BytesCalldataOps for bytes;
+
     BlockHistory public immutable blockHistory;
     IReliquary private immutable reliquary;
 
@@ -102,6 +105,44 @@ contract StateVerifier {
             (value, ) = RLP.splitBytes(value);
             require(value.length <= 32);
         }
+    }
+
+    /**
+     * @notice verifies that each storage slot is included in the storage trie
+     *         using the provided proofs. Accepts both existence and nonexistence
+     *         proofs. Reverts if a proof is invalid. Assumes the storageRoot
+     *         comes from a valid Ethereum account.
+     * @param proofNodes concatenation of all nodes used in the trie proofs
+     * @param slots the list of slots being proven
+     * @param slotProofs the compressed MPT proofs for each slot
+     * @param storageRoot the MPT root hash for the storage trie
+     * @return values the values in the storage slot, as bytes, with leading 0 bytes removed
+     */
+    function verifyMultiStorageSlot(
+        bytes calldata proofNodes,
+        bytes32[] calldata slots,
+        bytes calldata slotProofs,
+        bytes32 storageRoot
+    ) internal pure returns (BytesCalldata[] memory values) {
+        MPT.Node[] memory nodes = MPT.parseNodes(proofNodes);
+        MPT.Node[][] memory proofs = MPT.parseCompressedProofs(nodes, slotProofs, slots.length);
+        BytesCalldata[] memory results = new BytesCalldata[](slots.length);
+
+        for (uint256 i = 0; i < slots.length; i++) {
+            bytes32 key = keccak256(abi.encodePacked(slots[i]));
+            (bool exists, bytes calldata value) = MPT.verifyTrieValueWithNodes(
+                proofs[i],
+                key,
+                32,
+                storageRoot
+            );
+            if (exists) {
+                (value, ) = RLP.splitBytes(value);
+                require(value.length <= 32);
+            }
+            results[i] = value.convert();
+        }
+        return results;
     }
 
     /**

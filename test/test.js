@@ -1,9 +1,10 @@
 const { expect } = require("chai");
 const { sign } = require("crypto");
-const { defaultAbiCoder, keccak256 } = require("ethers/lib/utils");
+const { hexlify, defaultAbiCoder, keccak256 } = require("ethers/lib/utils");
 const { artifacts, config, ethers, network, waffle } = require("hardhat");
 const { loadFixture, solidity } = waffle;
 const { readFileSync } = require("fs");
+const RLP = require("rlp");
 const helpers = require("@nomicfoundation/hardhat-network-helpers");
 const sqlite3 = require("sqlite3");
 
@@ -379,13 +380,18 @@ describe("Reliquary", function () {
         const asProver = await ASProver.deploy(blockHistory.address, reliquary.address);
         await asProver.deployed();
 
-        async function getProofs(blockNum, account, slots) {
+        const MSSProver = await ethers.getContractFactory("MultiStorageSlotProver");
+        const mssProver = await MSSProver.deploy(blockHistory.address, reliquary.address);
+        await mssProver.deployed();
+
+        async function getProofs(blockNum, account, slots, concatSlots = true) {
             // use the base provider to fetch trie proofs, because hardhat doesn't support it
             const baseProvider = new ethers.providers.JsonRpcProvider(config.networks.hardhat.forking.url);
-            const res = await baseProvider.send("eth_getProof", [account, slots, "0x" + blockNum.toString(16)]);
+            const formatted = slots.map(s => defaultAbiCoder.encode(["uint256"], [s]));
+            const res = await baseProvider.send("eth_getProof", [account, formatted, "0x" + blockNum.toString(16)]);
 
             // concatenate proof nodes
-            const accountProof = "0x".concat(...res.accountProof.map((n) => n.substring(2)));
+            const accountProof = ethers.utils.concat(res.accountProof);
 
             let blockProof;
             if (blockNum >= targetBlock) {
@@ -401,17 +407,20 @@ describe("Reliquary", function () {
                 } else {
                     accountRoot = keccak256("0x");
                 }
-                slotProofs[sp.key] = "0x".concat(...sp.proof.map((n) => n.substring(2)));
+                if (concatSlots)
+                    slotProofs[sp.key] = ethers.utils.concat(sp.proof);
+                else
+                    slotProofs[sp.key] = sp.proof
             });
             const headerRLP = await getBlockHeader(blockNum);
 
             return {accountProof, headerRLP, blockProof, accountRoot, slotProofs};
         }
-        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, urier, getBlockHeader, getProofs };
+        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs };
     }
 
     async function fixtureAddProverValid(_wallets, _provider) {
-        const { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, urier, getBlockHeader, getProofs } = await loadFixture(fixture);
+        const { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs } = await loadFixture(fixture);
 
         await reliquary.grantRole(await reliquary.ADD_PROVER_ROLE(), addr0);
 
@@ -467,6 +476,11 @@ describe("Reliquary", function () {
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("PendingProverAdded");
 
+        tx = await reliquary.addProver(mssProver.address, 9);
+        receipt = await tx.wait();
+        expect(receipt.events.length).equals(1);
+        expect(receipt.events[0].event).equals("PendingProverAdded");
+
         await expect(
             reliquary.activateProver(bcProver.address)
         ).to.be.revertedWith("not ready");
@@ -502,6 +516,11 @@ describe("Reliquary", function () {
         expect(receipt.events[0].event).equals("NewProver");
 
         tx = await reliquary.activateProver(asProver.address);
+        receipt = await tx.wait();
+        expect(receipt.events.length).equals(1);
+        expect(receipt.events[0].event).equals("NewProver");
+
+        tx = await reliquary.activateProver(mssProver.address);
         receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("NewProver");
@@ -572,7 +591,15 @@ describe("Reliquary", function () {
             feeExternalId: 0
         }, ZERO_ADDR)
 
-        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, urier, getBlockHeader, getProofs };
+        await reliquary.setProverFee(mssProver.address, {
+            flags: 0x1, // none
+            feeCredits: 0,
+            feeWeiMantissa: 0,
+            feeWeiExponent: 0,
+            feeExternalId: 0
+        }, ZERO_ADDR)
+
+        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs };
     }
 
     async function fixtureAddProverShortWait(_wallets, _provider) {
@@ -1005,6 +1032,15 @@ describe("Reliquary", function () {
             true
         );
         await tx.wait();
+
+        // proving a slot from an empty storage trie should succeed
+        const nonContract = "0x0000000000000000000000000000000000000000";
+        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, nonContract, [slot]);
+        tx = await ssProver.prove(
+            encodeProof(nonContract, accountProof, slot, slotProofs[slot], headerRLP, blockProof),
+            true
+        );
+        await tx.wait();
     })
 
     it("test block header prover", async function () {
@@ -1078,6 +1114,57 @@ describe("Reliquary", function () {
             )
         ).to.be.revertedWith("Cached storage root doesn't exist");
     })
+
+    it("test multi storage slots", async function () {
+        const { reliquary, mssProver, getProofs } = await loadFixture(fixtureAddProverValid);
+
+        function encodeMSSProof(...args) {
+            return defaultAbiCoder.encode(
+                ["address", "bytes", "bytes", "bytes", "bytes", "bytes32[]", "bytes", "bool"],
+                args
+            );
+        }
+
+        function buildCompressedProof(
+            account, accountProof, header, blockProof, slotProofs, includeHeader
+        ) {
+            let slots = Object.keys(slotProofs)
+            let proofNodes = Array.from(new Set([].concat(...Object.values(slotProofs))))
+            let proofs = slots.map((s) => {
+                return slotProofs[s].map(node => proofNodes.indexOf(node))
+            })
+            proofNodes = "0x".concat(...proofNodes.map((n) => n.substring(2)));
+            proofs = hexlify(RLP.encode(proofs));
+            return encodeMSSProof(account, accountProof, header, blockProof, proofNodes, slots, proofs, includeHeader)
+        }
+
+        const WETH = new ethers.Contract(
+            "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            ["function balanceOf(address) view returns (uint256)"],
+            ethers.provider
+        );
+        const account = WETH.address
+
+        // compute storage slot of WETH.balanceOf(WETH) and WETH.balanceOf(0x00..00)
+        const BALANCE_MAP = 3;
+        const slots = [
+            keccak256(defaultAbiCoder.encode(["address", "uint256"], [account, BALANCE_MAP])),
+            keccak256(defaultAbiCoder.encode(["uint160", "uint256"], [0, BALANCE_MAP])),
+        ]
+        const includeHeader = true;
+
+        // fetch all the proof data
+        let {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(
+            targetBlock, account, slots, concatSlots=false
+        );
+
+        let tx = await mssProver.proveBatch(
+            buildCompressedProof(account, accountProof, headerRLP, blockProof, slotProofs, includeHeader),
+            false,
+            { gasLimit: 1000000 }
+        )
+    })
+
 
     it("test logs", async function () {
         const { reliquary, blockHistory, lProver, getProofs } = await loadFixture(fixtureAddProverValid);

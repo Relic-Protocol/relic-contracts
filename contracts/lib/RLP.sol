@@ -55,7 +55,7 @@ library RLP {
         }
     }
 
-    function skip(bytes calldata buf) internal pure returns (uint256 size) {
+    function nextSize(bytes calldata buf) internal pure returns (uint256 size) {
         assembly {
             if iszero(buf.length) {
                 revert(0, 0)
@@ -116,6 +116,15 @@ library RLP {
                 }
             }
         }
+    }
+
+    function skip(bytes calldata buf) internal pure returns (bytes calldata) {
+        uint256 size = RLP.nextSize(buf);
+        assembly {
+            buf.offset := add(buf.offset, size)
+            buf.length := sub(buf.length, size)
+        }
+        return buf;
     }
 
     function parseList(bytes calldata buf)
@@ -209,10 +218,13 @@ library RLP {
                     offset := add(lengthSize, 1)
                 }
             }
-        }
-        unchecked {
-            result = buf[offset:offset + size];
-            rest = buf[offset + size:];
+
+            result.offset := add(buf.offset, offset)
+            result.length := size
+
+            let end := add(offset, size)
+            rest.offset := add(buf.offset, end)
+            rest.length := sub(buf.length, end)
         }
     }
 

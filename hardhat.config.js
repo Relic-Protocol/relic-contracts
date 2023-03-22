@@ -78,7 +78,7 @@ const SEPOLIA_PRIVKEY = process.env.SEPOLIA_PRIVKEY || "";
  */
 module.exports = {
   solidity: {
-    version: "0.8.12",
+    version: "0.8.13",
     settings: {
       optimizer: {
         enabled: true,
@@ -100,6 +100,9 @@ module.exports = {
         blockNumber: 15040512,
       },
       saveDeployments: true,
+    },
+    localhost: {
+        url: "http://localhost:8545/"
     }
   },
   namedAccounts: {

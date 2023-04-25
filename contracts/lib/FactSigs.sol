@@ -124,6 +124,32 @@ library FactSigs {
     }
 
     /**
+     * @notice Produce the fact signature data for a withdrawal
+     * @param blockNum the block number
+     * @param index the withdrawal index
+     */
+    function withdrawalSigData(uint256 blockNum, uint256 index)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode("Withdrawal", blockNum, index);
+    }
+
+    /**
+     * @notice Produce the fact signature for a withdrawal
+     * @param blockNum the block number
+     * @param index the withdrawal index
+     */
+    function withdrawalFactSig(uint256 blockNum, uint256 index)
+        internal
+        pure
+        returns (FactSignature)
+    {
+        return Facts.toFactSignature(Facts.NO_FEE, withdrawalSigData(blockNum, index));
+    }
+
+    /**
      * @notice Produce the fact signature data for an event fact
      * @param eventId The event in question
      */

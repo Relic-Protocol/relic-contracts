@@ -27,6 +27,7 @@ library CoreTypes {
         uint256 Time;
         bytes32 MixHash;
         uint256 BaseFee;
+        bytes32 WithdrawalsHash;
     }
 
     struct AccountData {
@@ -40,6 +41,13 @@ library CoreTypes {
         address Address;
         bytes32[] Topics;
         bytes Data;
+    }
+
+    struct WithdrawalData {
+        uint256 Index;
+        uint256 ValidatorIndex;
+        address Address;
+        uint256 AmountInGwei;
     }
 
     function parseHash(bytes calldata buf) internal pure returns (bytes32 result, uint256 offset) {
@@ -94,6 +102,11 @@ library CoreTypes {
 
         if (header.length > 0) {
             (data.BaseFee, offset) = RLP.parseUint(header); // BaseFee
+            header = header.suffix(offset);
+        }
+
+        if (header.length > 0) {
+            (data.WithdrawalsHash, offset) = parseHash(header); // WithdrawalsHash
         }
     }
 
@@ -185,5 +198,22 @@ library CoreTypes {
         }
 
         return parseLog(receiptValue);
+    }
+
+    function parseWithdrawal(bytes calldata withdrawal)
+        internal
+        pure
+        returns (WithdrawalData memory data)
+    {
+        (, uint256 offset) = RLP.parseList(withdrawal);
+        withdrawal = withdrawal.suffix(offset);
+
+        (data.Index, offset) = RLP.parseUint(withdrawal); // Index
+        withdrawal = withdrawal.suffix(offset);
+        (data.ValidatorIndex, offset) = RLP.parseUint(withdrawal); // ValidatorIndex
+        withdrawal = withdrawal.suffix(offset);
+        (data.Address, offset) = parseAddress(withdrawal); // Address
+        withdrawal = withdrawal.suffix(offset);
+        (data.AmountInGwei, offset) = RLP.parseUint(withdrawal); // Amount
     }
 }

@@ -146,24 +146,24 @@ contract StateVerifier {
     }
 
     /**
-     * @notice verifies that the receipt is included in the receipts trie using
+     * @notice verifies that an entry is included in the indexed trie using
      *         the provided proof. Accepts both existence and nonexistence
-     *         proofs. Reverts if the proof is invalid. Assumes the receiptsRoot
-     *         comes from a valid Ethereum block header.
+     *         proofs. Reverts if the proof is invalid. Assumes the root comes
+     *         from a valid Ethereum MPT, i.e. from a valid block header.
      *
      * @param idx the receipt index in the block
-     * @param proof the MPT proof for the storage trie
-     * @param receiptsRoot the MPT root hash for the storage trie
-     * @return exists whether the receipt index exists
-     * @return value the value in the storage slot, as bytes, with leading 0 bytes removed
+     * @param proof the MPT proof for the indexed trie
+     * @param root the MPT root hash for the indexed trie
+     * @return exists whether the index exists
+     * @return value the value at the given index, as bytes
      */
-    function verifyReceipt(
+    function verifyIndexedTrieProof(
         uint256 idx,
         bytes calldata proof,
-        bytes32 receiptsRoot
+        bytes32 root
     ) internal pure returns (bool exists, bytes calldata value) {
         bytes memory key = RLP.encodeUint(idx);
-        (exists, value) = MPT.verifyTrieValue(proof, bytes32(key), key.length, receiptsRoot);
+        (exists, value) = MPT.verifyTrieValue(proof, bytes32(key), key.length, root);
     }
 
     /**
@@ -218,12 +218,44 @@ contract StateVerifier {
         bytes calldata blockProof
     ) internal view returns (CoreTypes.BlockHeaderData memory head, CoreTypes.LogData memory log) {
         head = verifyBlockHeader(header, blockProof);
-        (bool exists, bytes calldata receiptValue) = verifyReceipt(
+        (bool exists, bytes calldata receiptValue) = verifyIndexedTrieProof(
             txIdx,
             receiptProof,
             head.ReceiptHash
         );
         require(exists, "receipt does not exist");
         log = CoreTypes.extractLog(receiptValue, logIdx);
+    }
+
+    /**
+     * @notice verifies a withdrawal occurred in the given block using the
+     *         provided proofs. Reverts if the withdrawal doesn't exist or
+     *         if the proofs are invalid.
+     *
+     * @param idx the index of the withdrawal in the block
+     * @param withdrawalProof the Merkle-Patricia trie proof for the receipt
+     * @param header the block header, RLP encoded
+     * @param blockProof proof that the block header is valid
+     * @return head the parsed block header
+     * @return withdrawal the parsed withdrawal value
+     */
+    function verifyWithdrawalAtBlock(
+        uint256 idx,
+        bytes calldata withdrawalProof,
+        bytes calldata header,
+        bytes calldata blockProof
+    )
+        internal
+        view
+        returns (CoreTypes.BlockHeaderData memory head, CoreTypes.WithdrawalData memory withdrawal)
+    {
+        head = verifyBlockHeader(header, blockProof);
+        (bool exists, bytes calldata withdrawalValue) = verifyIndexedTrieProof(
+            idx,
+            withdrawalProof,
+            head.WithdrawalsHash
+        );
+        require(exists, "Withdrawal does not exist at block");
+        withdrawal = CoreTypes.parseWithdrawal(withdrawalValue);
     }
 }

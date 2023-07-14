@@ -4,6 +4,7 @@ const { hexlify, defaultAbiCoder, keccak256 } = require("ethers/lib/utils");
 const { artifacts, config, ethers, network, waffle } = require("hardhat");
 const { loadFixture, solidity } = waffle;
 const { readFileSync } = require("fs");
+const fetch = require('node-fetch');
 const RLP = require("rlp");
 const helpers = require("@nomicfoundation/hardhat-network-helpers");
 const sqlite3 = require("sqlite3");
@@ -11,10 +12,11 @@ const sqlite3 = require("sqlite3");
 const {
     buildMerkleRoot, buildMerkleProof, validMerkleProof,
     encodeValidBlockMerkleProof, encodeValidBlockSNARKProof,
-    signProof, headerRlp
+    signProof, headerRlp, readHashWords
 } = require("../utils/blockproof");
 
 const ZERO_ADDR = "0x" + "0".repeat(40);
+const ZERO_HASH = "0x" + "0".repeat(64);
 const addr0 = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 const addr1 = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 
@@ -64,34 +66,59 @@ function prefixAll(list) {
 }
 
 const MERKLE_TREE_DEPTH = 13;
-const PROOF_DEPTH = 15;
+const PROOF_DEPTH = 14;
 
 
 const forkBlock = config.networks.hardhat.forking.blockNumber;
 const endBlockNum = forkBlock - 1;
 const startBlockNum = endBlockNum + 1 - 2 ** PROOF_DEPTH;
 
-const firstDB = new sqlite3.Database('./test/data/proofs-first.db');
-const lastDB = new sqlite3.Database('./test/data/proofs-last.db');
+const db = new sqlite3.Database('./test/data/proofs.db');
 
-/*
-function addBlocks(db, base, num) {
+const BLOCK_DIR = process.env.BLOCK_DIR;
+const PROOF_URL = process.env.PROOF_URL;
+function addBlocks(base, num) {
     for (var i = base; i < base + num; i++) {
-        let hash = keccak256(readFileSync(`/home/user/proof/blocks/${i}`));
+        let hash = keccak256(readFileSync(`${BLOCK_DIR}/${i}`));
         let sql = "insert into blocks (num, hash) values (?,?)"
         db.run(sql, [i, hash]);
     }
 }
-addBlocks(lastDB, startBlockNum, 2**PROOF_DEPTH);
-addBlocks(firstDB, 0, 2**PROOF_DEPTH);
-*/
+//addBlocks(startBlockNum, 2**PROOF_DEPTH);
+//addBlocks(0, 2**PROOF_DEPTH);
+
+async function addProof(start, size) {
+    console.log(start, size);
+    let circuit_type = `outer_${size / 16}`;
+    let idx = start / size;
+    let url = `${PROOF_URL}/proof?block=${start}&count=${size}`;
+    let resp = await fetch(url).then(r => r.json());
+    return new Promise((res, rej) => {
+        const sql = "insert into proofs (circuit_type, idx, work_id, proof, calldata) values (?,?,?,?,?)";
+        db.run(sql, [circuit_type, idx, "", "", resp.calldata], function(err) {
+            if (err) rej(err);
+            res();
+        });
+    });
+}
+
+async function addProofs(base, num) {
+    let proms = [];
+    for (var size = 2**MERKLE_TREE_DEPTH; size <= num; size *= 2) {
+        for (var start = base; start < base + num; start += size) {
+            proms.push(addProof(start, size));
+        }
+    }
+    await Promise.all(proms)
+}
+//addProofs(0, 2**PROOF_DEPTH);
+//addProofs(startBlockNum, 2**PROOF_DEPTH);
 
 function getBlockHash(num) {
     expect(
         (num >= startBlockNum && num <= endBlockNum) ||
         (num >= 0 && num <= 2 ** PROOF_DEPTH)
     ).to.equal(true);
-    let db = num >= startBlockNum ? lastDB : firstDB;
     let sql = `select hash from blocks where num = (?)`;
     return new Promise((res, rej) => {
         db.get(sql, [num], (err, row) => {
@@ -107,8 +134,7 @@ function loadProof(startBlock, endBlock) {
     expect(numBlocks % 16).to.equal(0);
     let size = numBlocks / 16;
     let circuit_type = `outer_${size}`;
-    let idx = (startBlock % 2 ** 15) / numBlocks;
-    let db = startBlock >= startBlockNum ? lastDB : firstDB;
+    let idx = startBlock / numBlocks;
     let sql = `select calldata from proofs where circuit_type = (?) and idx = (?)`;
     return new Promise((res, rej) => {
         db.get(sql, [circuit_type, idx], (err, row) => {
@@ -121,6 +147,25 @@ function loadProof(startBlock, endBlock) {
         })
     })
 }
+
+async function getAuxRoot(startBlock, endBlock) {
+    let proof = await loadProof(startBlock, endBlock);
+    return proof.inputs[12];
+}
+
+describe("AuxRoots", function () {
+    it("test blockHistory", async function () {
+        const AuxRootTest = await ethers.getContractFactory("AuxRootTest");
+        const auxRootTest = await AuxRootTest.deploy();
+        await auxRootTest.deployed();
+
+
+        const l1 = await auxRootTest.auxRoot([ZERO_HASH, ZERO_HASH]);
+        const l2 = await auxRootTest.auxRoot([l1, l1]);
+        const other = await auxRootTest.auxRoot([ZERO_HASH, ZERO_HASH, ZERO_HASH, ZERO_HASH]);
+        await expect(l2).to.equal(other);
+    })
+})
 
 // must run first because we rely on the hardhat fork block being recent
 describe("Blocks", function () {
@@ -138,7 +183,10 @@ describe("Blocks", function () {
 
         const BlockHistory = await ethers.getContractFactory("BlockHistoryForTesting");
         const blockHistory = await BlockHistory.deploy(sizes, verifiers, ZERO_ADDR);
-        await blockHistory.deployed();
+        await blockHistory.deployed();;
+
+        const tx = await blockHistory.setSigner(ZERO_ADDR);
+        await tx.wait();
 
         return { blockHistory };
     }
@@ -160,6 +208,11 @@ describe("Blocks", function () {
             }));
             return buildMerkleRoot(hashes[i]);
         }));
+        let lastAuxRoots = await Promise.all(range(numRoots).map(async (i) => {
+            let start = startBlockNum + i * 2 ** MERKLE_TREE_DEPTH;
+            let end = start + 2 ** MERKLE_TREE_DEPTH - 1;
+            return getAuxRoot(start, end);
+        }));
 
         let lastProof = await loadProof(startBlockNum, endBlockNum);
 
@@ -169,13 +222,14 @@ describe("Blocks", function () {
         let proof = await encodeValidBlockSNARKProof(
             null, true, 2 ** PROOF_DEPTH, endBlockNum, lastProof, buildMerkleProof(allHashes, idx)
         );
+
         expect(
             await blockHistory.connect(ethers.provider).validBlockHash(allHashes[idx], startBlockNum + idx, proof, { from: ZERO_ADDR })
         ).to.equal(true);
 
         // prove the last chunk of blocks
         await expect(
-            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, "0x")
+            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, lastAuxRoots, "0x")
         ).to.emit(blockHistory, "ImportMerkleRoot");
 
         // verify merkle proofs
@@ -190,7 +244,7 @@ describe("Blocks", function () {
         // simulate proving all blocks in between
         let parentHash = await getBlockHash(2 ** PROOF_DEPTH - 1);
         await blockHistory.setHashesForTesting(parentHash, await blockHistory.lastHash());
-        await blockHistory.setEarliestRootForTesting(2**(PROOF_DEPTH  - MERKLE_TREE_DEPTH));
+        await blockHistory.setEarliestRootForTesting(2 ** (PROOF_DEPTH - MERKLE_TREE_DEPTH));
 
         // prove the first chunk of blocks
         console.log("building proof of oldest blocks...");
@@ -202,10 +256,15 @@ describe("Blocks", function () {
             }));
             return buildMerkleRoot(hashes[i]);
         }));
+        let firstAuxRoots = await Promise.all(range(numRoots).map(async (i) => {
+            let start = i * 2 ** MERKLE_TREE_DEPTH;
+            let end = start + 2 ** MERKLE_TREE_DEPTH - 1;
+            return getAuxRoot(start, end);
+        }));
         let firstProof = await loadProof(0, 2 ** PROOF_DEPTH - 1);
 
         await expect(
-            blockHistory.importParent([firstProof, "0x"], firstRoots)
+            blockHistory.importParent([firstProof, "0x"], firstRoots, firstAuxRoots)
         ).to.emit(blockHistory, "ImportMerkleRoot");
 
         expect(await blockHistory.parentHash()).to.equal("0x0000000000000000000000000000000000000000000000000000000000000000");
@@ -228,7 +287,7 @@ describe("Blocks", function () {
 
         console.log("testing importLast...");
         await expect(
-            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, "0x")
+            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, lastAuxRoots, "0x")
         ).to.emit(blockHistory, "ImportMerkleRoot");
 
         let signer = await ethers.getSigner(addr0);
@@ -240,17 +299,24 @@ describe("Blocks", function () {
         console.log("testing importLast with signature...");
         await expect(
             // no signature should now fail
-            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, "0x")
+            blockHistory.importLast(endBlockNum, [lastProof, "0x"], lastRoots, lastAuxRoots, "0x")
         ).to.be.revertedWith("ECDSA: invalid signature length");
 
         await expect(
             // sign the wrong proof, should fail
-            blockHistory.importLast(endBlockNum, [lastProof, await signProof(signer, firstProof)], lastRoots, "0x")
+            blockHistory.importLast(endBlockNum, [lastProof, await signProof(signer, firstProof)], lastRoots, lastAuxRoots, "0x")
         ).to.be.revertedWith("invalid SNARK");
+
+        let lastAuxRoots0 = lastAuxRoots.slice(0, lastAuxRoots.length / 2);
+        let incorrectAux = [].concat(lastAuxRoots0, lastAuxRoots0);
+        await expect(
+            // incorrect lastAuxRoots should fail
+            blockHistory.importLast(endBlockNum, [lastProof, await signProof(signer, firstProof)], lastRoots, incorrectAux, "0x")
+        ).to.be.revertedWith("invalid aux roots");
 
         await expect(
             // correct signature, should work
-            blockHistory.importLast(endBlockNum, [lastProof, await signProof(signer, lastProof)], lastRoots, "0x")
+            blockHistory.importLast(endBlockNum, [lastProof, await signProof(signer, lastProof)], lastRoots, lastAuxRoots, "0x")
         ).to.emit(blockHistory, "ImportMerkleRoot");
 
         // remove the signer now
@@ -268,7 +334,7 @@ describe("Blocks", function () {
             // merkle proof not needed since we're targeting the proof's parentHash
             null, false, 2 ** (PROOF_DEPTH - 1), endBlockNum, lastProof1, []
         );
-        await blockHistory.importLast(middle - 1, [lastProof0, "0x"], lastRoots0, connectProof);
+        await blockHistory.importLast(middle - 1, [lastProof0, "0x"], lastRoots0, lastAuxRoots0, connectProof);
         expect(await blockHistory.lastHash()).to.equal(await getBlockHash(middle - 1));
     })
 })
@@ -337,11 +403,11 @@ describe("Reliquary", function () {
         let preByzantiumHashes = new Array(BLOCKS_PER_CHUNK).fill(block.hash);
         const preByzantiumRoot = buildMerkleRoot(preByzantiumHashes);
 
-        // setup merkle roots used in tests
-        tx = await blockHistory.storeMerkleRootsForTesting(targetBlock / BLOCKS_PER_CHUNK, [root]);
+        // setup merkle roots used in tests, NOTE: auxiliary roots are wrong
+        tx = await blockHistory.storeMerkleRootsForTesting(targetBlock / BLOCKS_PER_CHUNK, [root], [root]);
         await tx.wait()
 
-        tx = await blockHistory.storeMerkleRootsForTesting(Math.floor(preByzantiumBlock / BLOCKS_PER_CHUNK), [preByzantiumRoot]);
+        tx = await blockHistory.storeMerkleRootsForTesting(Math.floor(preByzantiumBlock / BLOCKS_PER_CHUNK), [preByzantiumRoot], [preByzantiumRoot]);
         await tx.wait()
 
         const BCToken = await ethers.getContractFactory("BirthCertificateRelic");
@@ -363,6 +429,10 @@ describe("Reliquary", function () {
         const lProver = await LProver.deploy(blockHistory.address, reliquary.address);
         await lProver.deployed();
 
+        const TProver = await ethers.getContractFactory("TransactionProver");
+        const tProver = await TProver.deploy(blockHistory.address, reliquary.address);
+        await tProver.deployed();
+
         const BHProver = await ethers.getContractFactory("BlockHeaderProver");
         const bhProver = await BHProver.deploy(blockHistory.address, reliquary.address);
         await bhProver.deployed();
@@ -379,6 +449,10 @@ describe("Reliquary", function () {
         const ASProver = await ethers.getContractFactory("AccountStorageProver");
         const asProver = await ASProver.deploy(blockHistory.address, reliquary.address);
         await asProver.deployed();
+
+        const AIProver = await ethers.getContractFactory("AccountInfoProver");
+        const aiProver = await AIProver.deploy(blockHistory.address, reliquary.address);
+        await aiProver.deployed();
 
         const MSSProver = await ethers.getContractFactory("MultiStorageSlotProver");
         const mssProver = await MSSProver.deploy(blockHistory.address, reliquary.address);
@@ -414,13 +488,13 @@ describe("Reliquary", function () {
             });
             const headerRLP = await getBlockHeader(blockNum);
 
-            return {accountProof, headerRLP, blockProof, accountRoot, slotProofs};
+            return { accountProof, headerRLP, blockProof, accountRoot, slotProofs };
         }
-        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs };
+        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, tProver, bhProver, cssProver, asProver, aiProver, mssProver, urier, getBlockHeader, getProofs };
     }
 
     async function fixtureAddProverValid(_wallets, _provider) {
-        const { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs } = await loadFixture(fixture);
+        const { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, tProver, bhProver, cssProver, asProver, aiProver, mssProver, urier, getBlockHeader, getProofs } = await loadFixture(fixture);
 
         await reliquary.grantRole(await reliquary.ADD_PROVER_ROLE(), addr0);
 
@@ -428,6 +502,7 @@ describe("Reliquary", function () {
         let receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("PendingProverAdded");
+
         tx = await reliquary.activateProver(mockProver.address);
         receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
@@ -437,6 +512,7 @@ describe("Reliquary", function () {
         receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
         expect(receipt.events[0].event).equals("PendingProverAdded");
+
         tx = await reliquary.activateProver(aProver.address);
         receipt = await tx.wait();
         expect(receipt.events.length).equals(1);
@@ -446,40 +522,13 @@ describe("Reliquary", function () {
         await tx.wait();
 
         // now provers should become pending
-        tx = await reliquary.addProver(bcProver.address, 3);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(ssProver.address, 4);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(lProver.address, 5);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(bhProver.address, 6);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(cssProver.address, 7);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(asProver.address, 8);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
-
-        tx = await reliquary.addProver(mssProver.address, 9);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("PendingProverAdded");
+        let provers = [bcProver, ssProver, lProver, tProver, bhProver, cssProver, asProver, mssProver, aiProver];
+        for (let i = 0; i < provers.length; i++) {
+            tx = await reliquary.addProver(provers[i].address, i + 3);
+            receipt = await tx.wait();
+            expect(receipt.events.length).equals(1);
+            expect(receipt.events[0].event).equals("PendingProverAdded");
+        }
 
         await expect(
             reliquary.activateProver(bcProver.address)
@@ -490,40 +539,12 @@ describe("Reliquary", function () {
             reliquary.activateProver(mockProver.address)
         ).to.be.revertedWith("duplicate prover");
 
-        tx = await reliquary.activateProver(bcProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(ssProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(lProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(bhProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(cssProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(asProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
-
-        tx = await reliquary.activateProver(mssProver.address);
-        receipt = await tx.wait();
-        expect(receipt.events.length).equals(1);
-        expect(receipt.events[0].event).equals("NewProver");
+        for (let i = 0; i < provers.length; i++) {
+            tx = await reliquary.activateProver(provers[i].address);
+            receipt = await tx.wait();
+            expect(receipt.events.length).equals(1);
+            expect(receipt.events[0].event).equals("NewProver");
+        }
 
         await reliquary.grantRole(await reliquary.GOVERNANCE_ROLE(), addr0);
 
@@ -543,63 +564,17 @@ describe("Reliquary", function () {
             feeExternalId: 0
         }, ZERO_ADDR)
 
-        await reliquary.setProverFee(bcProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
+        for (let i = 0; i < provers.length; i++) {
+            await reliquary.setProverFee(provers[i].address, {
+                flags: 0x1, // none
+                feeCredits: 0,
+                feeWeiMantissa: 0,
+                feeWeiExponent: 0,
+                feeExternalId: 0
+            }, ZERO_ADDR)
+        }
 
-        await reliquary.setProverFee(ssProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        await reliquary.setProverFee(lProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        await reliquary.setProverFee(bhProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        await reliquary.setProverFee(cssProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        await reliquary.setProverFee(asProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        await reliquary.setProverFee(mssProver.address, {
-            flags: 0x1, // none
-            feeCredits: 0,
-            feeWeiMantissa: 0,
-            feeWeiExponent: 0,
-            feeExternalId: 0
-        }, ZERO_ADDR)
-
-        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, bhProver, cssProver, asProver, mssProver, urier, getBlockHeader, getProofs };
+        return { reliquary, blockHistory, mockToken, mockProver, aToken, aProver, bcToken, bcProver, ssProver, lProver, tProver, bhProver, cssProver, asProver, aiProver, mssProver, urier, getBlockHeader, getProofs };
     }
 
     async function fixtureAddProverShortWait(_wallets, _provider) {
@@ -1008,7 +983,7 @@ describe("Reliquary", function () {
         const slot = keccak256(defaultAbiCoder.encode(["address", "uint256"], [WETH.address, BALANCE_MAP]));
 
         // check proving slot works
-        let {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, WETH.address, [slot]);
+        let { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(targetBlock, WETH.address, [slot]);
         tx = await ssProver.prove(
             encodeProof(WETH.address, accountProof, slot, slotProofs[slot], headerRLP, blockProof),
             true
@@ -1017,7 +992,7 @@ describe("Reliquary", function () {
 
         // check proving the wrong account block fails
         const fakeAddr = WETH.address.replace("C", "D").toLowerCase();
-        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, fakeAddr, [slot]);
+        let { } = { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(targetBlock, fakeAddr, [slot]);
         await expect(
             ssProver.prove(encodeProof(WETH.address, accountProof, slot, slotProofs[slot], headerRLP, blockProof), true),
         ).to.be.revertedWith("node hash incorrect");
@@ -1026,7 +1001,7 @@ describe("Reliquary", function () {
         const emptySlot = keccak256(defaultAbiCoder.encode(["address", "uint256"], [fakeAddr, BALANCE_MAP]));
         expect(await WETH.balanceOf(fakeAddr)).to.equal(0);
 
-        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, WETH.address, [emptySlot]);
+        let { } = { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(targetBlock, WETH.address, [emptySlot]);
         tx = await ssProver.prove(
             encodeProof(WETH.address, accountProof, emptySlot, slotProofs[emptySlot], headerRLP, blockProof),
             true
@@ -1035,7 +1010,7 @@ describe("Reliquary", function () {
 
         // proving a slot from an empty storage trie should succeed
         const nonContract = "0x0000000000000000000000000000000000000000";
-        let {} = {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, nonContract, [slot]);
+        let { } = { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(targetBlock, nonContract, [slot]);
         tx = await ssProver.prove(
             encodeProof(nonContract, accountProof, slot, slotProofs[slot], headerRLP, blockProof),
             true
@@ -1051,9 +1026,9 @@ describe("Reliquary", function () {
 
         const blockNum = 1337;
 
-        let hashes = await Promise.all(range(2**MERKLE_TREE_DEPTH).map((i) => getBlockHash(i)));
+        let hashes = await Promise.all(range(2 ** MERKLE_TREE_DEPTH).map((i) => getBlockHash(i)));
         let root = buildMerkleRoot(hashes);
-        let tx = await blockHistory.storeMerkleRootsForTesting(0, [root]);
+        let tx = await blockHistory.storeMerkleRootsForTesting(0, [root], [root]);
         await tx.wait()
 
         let proof = encodeValidBlockMerkleProof(true, buildMerkleProof(hashes, blockNum));
@@ -1061,6 +1036,39 @@ describe("Reliquary", function () {
 
         tx = await bhProver.prove(encodeProof(headerRLP, proof), false);
         await tx.wait();
+    })
+
+    it("test account info proofs", async function () {
+        const { aiProver, getProofs } = await loadFixture(fixtureAddProverValid);
+
+        function encodeAIProof(...args) {
+            return defaultAbiCoder.encode(["address", "bytes", "bytes", "bytes", "uint8"], args);
+        }
+        const WETHAddr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+
+        // fetch all the proof data
+        let { accountProof, headerRLP, blockProof } = await getProofs(targetBlock, WETHAddr, []);
+
+        // proofs of  StorageRoot, CodeHash, RawHeader, Balance, Nonce, respectively
+        await aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 0), true);
+        await aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 1), true);
+
+
+        var tx = await aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 2), true);
+        let balance = await ethers.provider.getBalance(WETHAddr, targetBlock);
+        expect((await tx.wait()).events[0].args[0][2]).to.equal(balance);
+
+        tx = await aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 3), true);
+        expect((await tx.wait()).events[0].args[0][2]).to.equal(ethers.BigNumber.from(1));
+
+        tx = await aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 4), true);
+        let header = defaultAbiCoder.decode(["uint256", "uint256", "bytes32", "bytes32"], (await tx.wait()).events[0].args[0][2]);
+        expect(header[0]).to.equal(ethers.BigNumber.from(1));
+        expect(header[1]).to.equal(balance);
+        expect(header[2]).to.equal('0x76643f129d938c49d13bf455319a1086255d059e0f570889ddb1a634d6ab8d59');
+        expect(header[3]).to.equal('0xd0a06b12ac47863b5c7be4185c2deaad1c61557033f56c7d4ea74429cbb25e23');
+        // invalid type
+        await expect(aiProver.prove(encodeAIProof(WETHAddr, accountProof, headerRLP, blockProof, 5), true)).to.be.reverted;
     })
 
     it("test cached storage slots", async function () {
@@ -1086,7 +1094,7 @@ describe("Reliquary", function () {
         const slot1 = keccak256(defaultAbiCoder.encode(["uint160", "uint256"], [0, BALANCE_MAP]));
 
         // fetch all the proof data
-        let {accountProof, headerRLP, blockProof, accountRoot, slotProofs} = await getProofs(targetBlock, WETH.address, [slot0, slot1]);
+        let { accountProof, headerRLP, blockProof, accountRoot, slotProofs } = await getProofs(targetBlock, WETH.address, [slot0, slot1]);
 
         // prove the account storage root and store it
         await asProver.prove(
@@ -1097,7 +1105,7 @@ describe("Reliquary", function () {
         // prove each storage slot using the cached proof
         tx = await cssProver.prove(
             encodeCSSProof(WETH.address, targetBlock, accountRoot, slot0, slotProofs[slot0]),
-            false 
+            false
         );
         await tx.wait();
         tx = await cssProver.prove(
@@ -1154,8 +1162,8 @@ describe("Reliquary", function () {
         const includeHeader = true;
 
         // fetch all the proof data
-        let {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(
-            targetBlock, account, slots, concatSlots=false
+        let { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(
+            targetBlock, account, slots, concatSlots = false
         );
 
         let tx = await mssProver.proveBatch(
@@ -1165,6 +1173,34 @@ describe("Reliquary", function () {
         )
     })
 
+    it("test transaction", async function () {
+        const { reliquary, blockHistory, tProver, getProofs } = await loadFixture(fixtureAddProverValid);
+
+        function encodeProof(...args) {
+            return defaultAbiCoder.encode(["uint256", "bytes", "bytes", "bytes"], args)
+        }
+
+        console.log(targetBlock);
+        let { headerRLP, blockProof } = await getProofs(targetBlock, ZERO_ADDR, []);
+        const txIdx = 0;
+        const txProof = "0xf90131a0f348c9a153f67f01b7a3dab0dcb7611ad7b37f354d28e7e2a81270f9d173b0c7a05cd917f9ad7e57c33f2a2e53a9d0b61e6c1c771c1e642f31a9c19e668af9f350a036805f3adadd198374151657ad5525a16116ba611fb2e60e8fee83f7a03c22d7a0c71eb9d7c6af2b5c6a06a8702d6e75831ce88e93f59d0783a0bb1b4c780ad62ba0fc1a8e52f8b69e92f013530d06f5cc1efb36eb0a1ccce1a133b2df44cc016175a0adcede28a7be8acc30372243d2cce379c9d28ce94cc68a76c479bedfd08995caa0227547fc2154d7ba40863f276714de78505aa9b24b624cc8be10064c3c85997ea0a5f50dc89f83f082b33006de0d58de0361fc07bd4763171184fc07ea96ebb891a08dae7938181d439c7d94b42ade28ed6bff3c0f7452aaa745283f5a87faaa79f88080808080808080f851a0abb30c992ab3df329c8e30cc976a0570ff573b2ea5fbd1cc9c29202a53ae9524a0b2b7135a93ff7892f0e1aef5641772ab3a54c33769b94efe77b2b940d9ed477e808080808080808080808080808080f9017d20b9017902f901750182215f850ba43b740085174a3a980a83028565947a250d5630b4cf539739df2c5dacb4c659f2488d80b90104791ac94700000000000000000000000000000000000000003c1bd650024a280a9d0a2d0f00000000000000000000000000000000000000000000000001513af140c9fe0000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000009dda370f43567b9c757a3f946705567bce482c42000000000000000000000000000000000000000000000000000000006439b05d00000000000000000000000000000000000000000000000000000000000000020000000000000000000000002efd3c85fb08a1bb901b1351f8bb596da7b4b711000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2c001a0e5022ab879d0c356f1362d54a8a1d6b7d13f4f61619102a91d7be649071f4caca04d82d738d6015d44b2131b341ceee37e17b9cef7abc5aab7f24676b5e28b4008";
+
+        const txHash = '0x1fcfd598d7435abd479bf380041c30f0db3f1dddf18404aeab4262c171798a0b';
+
+        let tx = await tProver.prove(encodeProof(txIdx, txProof, headerRLP, blockProof), false);
+        const expected = ("0x" + keccak256(defaultAbiCoder.encode(["string", "bytes32"], ["Transaction", txHash])).substring(4) + "00");
+        expect((await tx.wait()).events[0].args.fact.sig).to.equal(expected);
+
+        let { } = { headerRLP, blockProof } = await getProofs(preByzantiumBlock, ZERO_ADDR, []);
+
+        const preByzantiumTxIdx = 13;
+        const preByzantiumTxProof = "0xf871a0a39afa6bee91397fdac7e5d6e4ce5294780faa5a281a6692b84c9cf4a3a09d5ba035164cd9d2900cf073a8b1b1dca6ed1ff7e437fa5029ffcf9aa970442af64994808080808080a09d9900269a5be8f4adc6cd1b77ec50f2cdb5bec283768f4af22c987aed865b638080808080808080f901f180a0909afeebf164b38c0c8eaf7466633db70286a30ce17b8f3e4430629c203b1ac2a0ec8912dd0ff111652b30f70663be2eee6f021ab871d6e25fd83390c5ad0e667ba062b0201bb21b091b0b9fc9eff1417ce0ea27b1d5926fc4b1e1088b9422948b67a0b280077d7516aa2831166a6b9bb521a83a1924553370367b7d05c318fd641de5a0f03b2eb4242c4827ff944f0e7db4670b8d6ee7121c8ad59c42a570fd41cb169ca0f16ecd6d4834fbe407daf89b5d17ebfcfcba796bf2fef20448914769752b5eeaa0b4f376b6867f53733959903c992db779268d937b815f1082e6b0090323f23747a06e96a1384fe87d470160dd606cd4ba0f0e595d30fd7700be23c060788440f20fa0b1ea086ac80354f452f83a21e6d0f2f021de19a46d09ecb4ae70e5d2df0bee02a04a37def3383ed510fc6a654b8c8ccf155da6e49b641dc6078214708a6ea62336a0ebbcc305c26b6263dbabcf6e5847a297890f78daacecec773d2fed7e07adfe82a07fb5c04b95964f3804e669c86e0d64aa405285492c20dc49e380a2b8fd88b89ba0ee1035418cf03157b29dfa483e8846a435b601bd089b3157eded2c5e94fe70e5a017be2bc21327ffa5ef06bb6cee132fd973ad99e4017225f49d883b47acc9085ca032864287cd1aff9fae83a06f12ccc5e50e8374d56bc23fbc212fbe3744e1f87280f901d320b901cff901cc82040a8502540be4008303d090948d12a197cb00d4747a1fe03395095ce2a5cc681980b901640a19b14a0000000000000000000000004156d3342d5c385a87d264f9065373359200058100000000000000000000000000000000000000000000000000000002540be40000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c12dc63fa970000000000000000000000000000000000000000000000000000000000000042d552000000000000000000000000000000000000000000000000000000005c6fe83a0000000000000000000000008aff5f6782032de53f5c9cbf4abe0e6358ae419e000000000000000000000000000000000000000000000000000000000000001ce18156e901adbaeb0fb38d30e0c74e3b94bb13b0e02f16cc009e49576050d2d87fd00d73811a7540504e34a2007e12a37ab9752d8242da066906ae5765d33ebc00000000000000000000000000000000000000000000000000000002540be4001ba08e88fc3d1191c3a80715fbf91a2780ce1b4e83adc9a65cf0dcc49ffb4597c0699f387dc7158279c213d89f02696f9e7915f38c76ba3221dd87586a3f77236c21";
+        tx = await tProver.prove(
+            encodeProof(preByzantiumTxIdx, preByzantiumTxProof, headerRLP, blockProof),
+            false
+        );
+        await tx.wait();
+    })
 
     it("test logs", async function () {
         const { reliquary, blockHistory, lProver, getProofs } = await loadFixture(fixtureAddProverValid);
@@ -1176,13 +1212,13 @@ describe("Reliquary", function () {
         let { headerRLP, blockProof } = await getProofs(targetBlock, ZERO_ADDR, []);
         const txIdx = 0;
         const logIdx = 1;
-        const receiptProof = "0xf90131a02b93fee34700ed65203db4e5ba93ba2d696759beb8c226d908b29e8c23eff215a01774c1bfad432ae14b7e573dc393cd0422c95f5e2af8f258edb532c512810841a081ba5f594381eb2065c140e9571719bba8f6d5a0184b426651c19f1893e5f1efa0798d72111e01866e41725e9fa6a975f44c107c624a1cbf67ef804fd46d6dda1da01bec5d884f644dce22b4579d269e9e5345c49422a0e31337337a504c3e15a7f0a06eed59a46743d8e7014172b453fc87d44b18ce3ea4e53cd1ead181a2be927105a08e2a18e5082c7c5377d43ab8da9da0454343a27bd8ba2337022f300d747dd71aa06268d91234d96ccf288550ad162efae80b291fcbfd0e6d23dda33e9c7944a83aa05a3cfa98252ff1332cde50fa4394435e7cb00ffc01fd8211d37886547600e3208080808080808080f871a0ff354e276688deb53a63cacd72e632d8ce084bf375f3facc2f75455a88257ab9a00709f4563e3f0f9ebdb07982a2b24dade944d53d0bbac1d21799ed45876228d5a0fc795bb14c5d977ce7b21827cff8d991f6c72861c50e6d110499517210d596098080808080808080808080808080f9044220b9043e02f9043a0183019462b9010000280000000000000000000080000000000000400000000000000800000000000000000000000001000000000000000002000000080000000000000000000000010000000000000000000008000000200000000000000000000040008000000000000000000000000000000000000000000000000000000000000010000008000000000000000000000000000000000000000001000000080000004000000000000000000000001010000000000000000000000000000000000000000080000000000002000000000000000000000000000000000000001000040000000000000000200000000000000000000010000000000000000000500000410000000000f9032ff87a94c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2f842a0e1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109ca00000000000000000000000008032eaede5c55f744387ca53aaf0499abcd783e5a0000000000000000000000000000000000000000000000000209ce08c962b0000f89b94c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2f863a0ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa00000000000000000000000008032eaede5c55f744387ca53aaf0499abcd783e5a0000000000000000000000000877d9c970b8b5501e95967fe845b7293f63e72f7a0000000000000000000000000000000000000000000000000209ce08c962b0000f89b94f203ca1769ca8e9e8fe1da9d147db68b6c919817f863a0ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa0000000000000000000000000877d9c970b8b5501e95967fe845b7293f63e72f7a000000000000000000000000037a48e35d0e98c3bacfeb025bd76b173eb736257a00000000000000000000000000000000000000000000003cd23ce760b492b17ebf87994877d9c970b8b5501e95967fe845b7293f63e72f7e1a01c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1b84000000000000000000000000000000000000000000000000957779e78345638f80000000000000000000000000000000000000000000113c61f3b9621729cc2e1f8fc94877d9c970b8b5501e95967fe845b7293f63e72f7f863a0d78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822a00000000000000000000000008032eaede5c55f744387ca53aaf0499abcd783e5a000000000000000000000000037a48e35d0e98c3bacfeb025bd76b173eb736257b880000000000000000000000000000000000000000000000000209ce08c962b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003cd23ce760b492b17eb";
+        const receiptProof = "0xf90131a009d7bd13fc1da64f9f83b2ddac3446499601f5574842fd5351a1ddc7bb85a711a00b58ce5acc58241ab5e1d480e79cf1bb020883203a42e48a108dc9b7df1629e4a0f18eee06410397ace8b23d9e344fb69ddb7bf4f1b881e91acbf28fd70e8b07c9a0582a877f65a431a9495fc0118fb23516fed3e4cdfdb4d76ce2d29074c81dd363a0e3e1c30de3049fba04442f995883ff1208870ced7587593a018ea7bfdedae51da043942c9c0677453fccc0f4292aaa06d1c383523858c1a60ac43476865cad4a3ba07af1fb1b6e1c9ea449b57689a7cc89d1a7bf2b1d4fb73440800282aaa6b55f3aa0f4d09618662fd680fdcf4331262bd685bdb6e1564ea97d5596e4d337c3acfee8a0e875593b9bb39fa9ccc17dfa599eae72b08c5a677012378e15de4e0c023a65ab8080808080808080f851a0a084afcc241b2e52e9628fbfb2538c2e7a20933e56b753eb92b9897d4c12d36ca0c5991d966fe94b48b8429d30ce75023c70bd5986e11165555030f0c054513cb2808080808080808080808080808080f904df20b904db02f904d7018301cbc9b90100002000000000000010000000800010000000000000000100000100000000000000000000000000000000000000000000020000000a0000000000000000201000000800000000000002000008000000200000000000400000000000000000000000000000000000000000000000000002000000000001040000000010000000000000000000000000004004000000000000000000000000080000004000010000020000000000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000001000000002000020000010200000000000000000000000000000000000000000000000000000000000f903ccf89b942efd3c85fb08a1bb901b1351f8bb596da7b4b711f863a0ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa00000000000000000000000009dda370f43567b9c757a3f946705567bce482c42a00000000000000000000000000ad98ae69de9355fac4d6ec3036da58b92c0f6f6a000000000000000000000000000000000000000003c1bd650024a280a9d0a2d0ff89b942efd3c85fb08a1bb901b1351f8bb596da7b4b711f863a08c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925a00000000000000000000000009dda370f43567b9c757a3f946705567bce482c42a00000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488da0fffffffffffffffffffffffffffffffffffffffdd6aeb8171cf94181716045cbf89b94c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2f863a0ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3efa00000000000000000000000000ad98ae69de9355fac4d6ec3036da58b92c0f6f6a00000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488da000000000000000000000000000000000000000000000000002320ce76bfb5200f879940ad98ae69de9355fac4d6ec3036da58b92c0f6f6e1a01c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1b8400000000000000000000000000000000000000006eba8728da049c637153b968d0000000000000000000000000000000000000000000000003eb419f472df312df8fc940ad98ae69de9355fac4d6ec3036da58b92c0f6f6f863a0d78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822a00000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488da00000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488db88000000000000000000000000000000000000000003c1bd650024a280a9d0a2d0f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002320ce76bfb5200f87a94c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2f842a07fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65a00000000000000000000000007a250d5630b4cf539739df2c5dacb4c659f2488da000000000000000000000000000000000000000000000000002320ce76bfb5200";
 
         let tx = await lProver.prove(encodeProof(txIdx, logIdx, receiptProof, headerRLP, blockProof), false);
         await tx.wait();
 
         const oobTxIdx = 331;
-        const oobReceiptProof = "0xf90131a02b93fee34700ed65203db4e5ba93ba2d696759beb8c226d908b29e8c23eff215a01774c1bfad432ae14b7e573dc393cd0422c95f5e2af8f258edb532c512810841a081ba5f594381eb2065c140e9571719bba8f6d5a0184b426651c19f1893e5f1efa0798d72111e01866e41725e9fa6a975f44c107c624a1cbf67ef804fd46d6dda1da01bec5d884f644dce22b4579d269e9e5345c49422a0e31337337a504c3e15a7f0a06eed59a46743d8e7014172b453fc87d44b18ce3ea4e53cd1ead181a2be927105a08e2a18e5082c7c5377d43ab8da9da0454343a27bd8ba2337022f300d747dd71aa06268d91234d96ccf288550ad162efae80b291fcbfd0e6d23dda33e9c7944a83aa05a3cfa98252ff1332cde50fa4394435e7cb00ffc01fd8211d37886547600e3208080808080808080f871a0ff354e276688deb53a63cacd72e632d8ce084bf375f3facc2f75455a88257ab9a00709f4563e3f0f9ebdb07982a2b24dade944d53d0bbac1d21799ed45876228d5a0fc795bb14c5d977ce7b21827cff8d991f6c72861c50e6d110499517210d596098080808080808080808080808080e4820001a06091335ead2e28652f5cee2cdb2f1914eeea20793373888a7ed1e0e5a20f5426f8b1a0baf8bb28fc2f931acb17eea60ebe5e1bacab4c5af4c594caf1923ffbb114e041a02df5174e5cb15b9e3dbe247e7f7b6e8643d1ad443ff42b7f0acbce2db8cec744a02b9047c4182f17108913e9524234e7c6b9eff9a5436a5742f5963f15d9dee68ea03e564a6d01025930443ecba490499f606d09c3a653339c5302a1568a57e11dd8a0654e1900c5d42f2d255d3ac8d713fa4ae682a5e0956af21d5c7297bf3b0d1e63808080808080808080808080f90171a0c2d768d7d0c66c667df877b3a528b435a05f090d590a4e927f105392ccaf3024a039f38dd53fa90690a5c0462d30bc5fec93b2e298d0ebce924b40c00f1e962ec6a0a2da0bbc790a89430abbedb7849f48f8589183702d44cda2aaf71bb1f29ab5c2a08c85b3eb2b4d1a0a9325e64aaef0e3a6b4be432ca61bec37e0e71eddc744f73ca09f88ee30a0dcb6140c42a7a60c2a2cedd7bee192d31d1c9a942600fc6b05973da06769588ae30f44d050c558b6320e8a27490307884a0dfe24db5c17477404df6ba0b30b4572c1848f8aa5923fdecdd4d50d7f1943864fd36d36093c34449a05c9b5a033bbba9124f3a3a818002552eecae439865f2094a62c5f1e01ea5a5c9269fc57a08f54c4aecbeceff8d9687cbcfdb863cc80a0d3302cc6ccdb45b258fd53ea8dfaa0008926c7b101c528cc96d9fa65b36e101f3b853932bb0716e42ea9f30652a74ca0b1be00fa487840d1711d9c46dec6e3733de5472881e61d18ea42c0b13aa91f0d808080808080";
+        const oobReceiptProof = "0xf90131a009d7bd13fc1da64f9f83b2ddac3446499601f5574842fd5351a1ddc7bb85a711a00b58ce5acc58241ab5e1d480e79cf1bb020883203a42e48a108dc9b7df1629e4a0f18eee06410397ace8b23d9e344fb69ddb7bf4f1b881e91acbf28fd70e8b07c9a0582a877f65a431a9495fc0118fb23516fed3e4cdfdb4d76ce2d29074c81dd363a0e3e1c30de3049fba04442f995883ff1208870ced7587593a018ea7bfdedae51da043942c9c0677453fccc0f4292aaa06d1c383523858c1a60ac43476865cad4a3ba07af1fb1b6e1c9ea449b57689a7cc89d1a7bf2b1d4fb73440800282aaa6b55f3aa0f4d09618662fd680fdcf4331262bd685bdb6e1564ea97d5596e4d337c3acfee8a0e875593b9bb39fa9ccc17dfa599eae72b08c5a677012378e15de4e0c023a65ab8080808080808080f851a0a084afcc241b2e52e9628fbfb2538c2e7a20933e56b753eb92b9897d4c12d36ca0c5991d966fe94b48b8429d30ce75023c70bd5986e11165555030f0c054513cb2808080808080808080808080808080";
 
         await expect(
             lProver.prove(encodeProof(oobTxIdx, 0, oobReceiptProof, headerRLP, blockProof), false)
@@ -1192,7 +1228,7 @@ describe("Reliquary", function () {
             lProver.prove(encodeProof(txIdx, 100, receiptProof, headerRLP, blockProof), false)
         ).to.be.revertedWith("log index does not exist");
 
-        let {} = { headerRLP, blockProof } = await getProofs(preByzantiumBlock, ZERO_ADDR, []);
+        let { } = { headerRLP, blockProof } = await getProofs(preByzantiumBlock, ZERO_ADDR, []);
 
         const preByzantiumTxIdx = 0;
         const preByzantiumLogIdx = 0;
@@ -1218,29 +1254,29 @@ describe("Reliquary", function () {
         }
 
         // prove targetBlock + 1
-        let {accountProof, headerRLP, blockProof} = await getProofs(targetBlock + 1, WETH.address, []);
+        let { accountProof, headerRLP, blockProof } = await getProofs(targetBlock + 1, WETH.address, []);
         tx = await bcProver.prove(encodeProof(WETH.address, accountProof, headerRLP, blockProof), true);
         await tx.wait();
 
         // check proving later block reverts
-        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock + 2, WETH.address, []);
+        let { } = { accountProof, headerRLP, blockProof } = await getProofs(targetBlock + 2, WETH.address, []);
         await expect(
             bcProver.prove(encodeProof(WETH.address, accountProof, headerRLP, blockProof), true)
         ).to.be.revertedWith("older block already proven");
 
         // check proving earlier block succeeds
-        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address, []);
+        let { } = { accountProof, headerRLP, blockProof } = await getProofs(targetBlock, WETH.address, []);
         tx = await bcProver.prove(encodeProof(WETH.address, accountProof, headerRLP, blockProof), true);
         await tx.wait();
 
         // check proving the wrong account block fails
-        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
+        let { } = { accountProof, headerRLP, blockProof } = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
         await expect(
             bcProver.prove(encodeProof(WETH.address, accountProof, headerRLP, blockProof), true)
         ).to.be.revertedWith("node hash incorrect");
 
         // check proving an empty account fails
-        let {} = {accountProof, headerRLP, blockProof} = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
+        let { } = { accountProof, headerRLP, blockProof } = await getProofs(targetBlock, WETH.address.replace("C", "D"), []);
         await expect(
             bcProver.prove(
                 encodeProof((WETH.address.replace("C", "D")).toLowerCase(), accountProof, headerRLP, blockProof),
@@ -1295,7 +1331,7 @@ describe("Reliquary", function () {
 
         const receiverAddr = receiver.address;
         const fakeProver = "0x" + "0".repeat(40);
-        let context = {initiator: addr, receiver: receiverAddr, extra: "0x", gasLimit: 50000, requireSuccess: false};
+        let context = { initiator: addr, receiver: receiverAddr, extra: "0x", gasLimit: 50000, requireSuccess: false };
         await expect(
             ephemeralFacts.proveEphemeral(context, fakeProver, "0x")
         ).to.be.revertedWith("unknown prover");
@@ -1314,12 +1350,12 @@ describe("Reliquary", function () {
             receiverAddr,
             "0x",
             context.gasLimit,
-            {value: ETHER.div(2)}
+            { value: ETHER.div(2) }
         )).to.emit(ephemeralFacts, "FactRequested");
 
-        let {accountProof, headerRLP, blockProof, slotProofs} = await getProofs(targetBlock, WETH.address, [slot]);
+        let { accountProof, headerRLP, blockProof, slotProofs } = await getProofs(targetBlock, WETH.address, [slot]);
         let ssProof = encodeSSProof(WETH.address, accountProof, slot, slotProofs[slot], headerRLP, blockProof);
-        
+
         let before = await ethers.provider.getBalance(addr);
         context.initiator = requester.address;
         let tx = ephemeralFacts.proveEphemeral(context, ssProver.address, ssProof);
@@ -1360,7 +1396,7 @@ describe("Reliquary", function () {
         const { reliquary, mockProver } = await loadFixture(fixture);
 
         const TimelockController = await ethers.getContractFactory("TimelockController");
-        const timelock = await TimelockController.deploy(3600, [addr0], [addr0]);
+        const timelock = await TimelockController.deploy(3600, [addr0], [addr0], addr0);
         await reliquary.grantRole(await reliquary.DEFAULT_ADMIN_ROLE(), timelock.address);
         await reliquary.renounceRole(await reliquary.DEFAULT_ADMIN_ROLE(), addr0);
 

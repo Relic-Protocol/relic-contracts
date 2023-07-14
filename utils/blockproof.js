@@ -85,6 +85,9 @@ function headerRlp(header) {
     if (header.baseFeePerGas) {
         list.push(header.baseFeePerGas);
     }
+    if (header.withdrawalsRoot) {
+        list.push(header.withdrawalsRoot);
+    }
 
     list = list.map((v) => {
         if (v == "0x0") {
@@ -133,8 +136,46 @@ async function signProof(signer, proof) {
     return signer.signMessage(arrayify(hash));
 }
 
+function byteReverse(input) {
+    let v = ethers.BigNumber.from(input);
+
+    const FLIP_MASK = ethers.BigNumber.from("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+    function not(x) {
+        return x.xor(FLIP_MASK)
+    }
+
+    const MASK08 = ethers.BigNumber.from("0xFF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00FF00");
+    const MASK16 = ethers.BigNumber.from("0xFFFF0000FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000");
+    const MASK32 = ethers.BigNumber.from("0xFFFFFFFF00000000FFFFFFFF00000000FFFFFFFF00000000FFFFFFFF00000000")
+    const MASK64 = ethers.BigNumber.from("0xFFFFFFFFFFFFFFFF0000000000000000FFFFFFFFFFFFFFFF0000000000000000");
+
+    // swap bytes
+    v = v.and(MASK08).shr(8).or((v.and(not(MASK08))).shl(8));
+
+    // swap 2-byte long pairs
+    v = v.and(MASK16).shr(16).or(v.and(not(MASK16)).shl(16));
+
+    // swap 4-byte long pairs
+    v = v.and(MASK32).shr(32).or(v.and(not(MASK32)).shl(32));
+
+    // swap 8-byte long pairs
+    v = v.and(MASK64).shr(64).or(v.and(not(MASK64)).shl(64));
+
+    // swap 16-byte long pairs
+    v = v.shr(128).or(v.shl(128));
+}
+
+function readHashWords(words) {
+    const mask = ethers.BigNumber.from("0xffffffffffffffff");
+    result = words[0].and(mask)
+        .or(words[1].and(mask).shl(0x40))
+        .or(words[2].and(mask).shl(0x80))
+        .or(words[3].and(mask).shl(0xc0));
+    return byteReverse(result);
+}
+
 module.exports = {
     buildMerkleRoot, buildMerkleProof, validMerkleProof,
     encodeValidBlockMerkleProof, encodeValidBlockSNARKProof,
-    signProof, headerRlp
+    signProof, headerRlp, readHashWords
 }

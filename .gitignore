@@ -3,3 +3,4 @@
 /coverage
 /coverage.json
 /node_modules
+[._]*.sw[a-z]

@@ -70,6 +70,8 @@ task("accounts", "Prints the list of accounts", async (taskArgs, hre) => {
 });
 
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL || "";
+const MAINNET_PRIVKEY = process.env.MAINNET_PRIVKEY || "";
+const SIGNING_PRIVKEY = process.env.SIGNING_PRIVKEY || "";
 const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL || "";
 const SEPOLIA_PRIVKEY = process.env.SEPOLIA_PRIVKEY || "";
 
@@ -94,10 +96,16 @@ module.exports = {
       url: SEPOLIA_RPC_URL,
       accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
     },
+    mainnet: {
+      url: MAINNET_RPC_URL,
+      accounts:
+        (MAINNET_PRIVKEY.length ? [ MAINNET_PRIVKEY ] : [])
+          .concat(SIGNING_PRIVKEY.length ? [ SIGNING_PRIVKEY ] : [])
+    },
     hardhat: {
       forking: {
         url: MAINNET_RPC_URL,
-        blockNumber: 15040512,
+        blockNumber: 17055744,
       },
       saveDeployments: true,
     },
@@ -113,8 +121,7 @@ module.exports = {
   },
   relic: {
     vkSizes: [
-        0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000, 0x4000,
-        0x8000, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000
+        0x2000, 0x4000, 0x8000, 0x10000, 0x20000, 0x40000, 0x80000, 0x100000
     ]
   }
 };

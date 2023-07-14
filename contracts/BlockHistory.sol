@@ -4,10 +4,11 @@
 
 pragma solidity >=0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
 import "./lib/CoreTypes.sol";
 import "./lib/MerkleTree.sol";
+import "./lib/AuxMerkleTree.sol";
 import "./interfaces/IBlockHistory.sol";
 import "./interfaces/IRecursiveVerifier.sol";
 
@@ -36,7 +37,10 @@ import {
  *      Due to this, the historical blocks' merkle roots are imported in reverse
  *      order.
  */
-contract BlockHistory is Ownable, IBlockHistory {
+contract BlockHistory is AccessControl, IBlockHistory {
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant QUERY_ROLE = keccak256("QUERY_ROLE");
+
     // depth of the merkle trees whose roots we store in storage
     uint256 private constant MERKLE_TREE_DEPTH = 13;
     uint256 private constant BLOCKS_PER_CHUNK = 1 << MERKLE_TREE_DEPTH;
@@ -64,7 +68,13 @@ contract BlockHistory is Ownable, IBlockHistory {
     /// @dev merkle roots of block chunks between parentHash and lastHash
     mapping(uint256 => bytes32) private merkleRoots;
 
-    event ImportMerkleRoot(uint256 indexed index, bytes32 merkleRoot);
+    /// @dev ZK-Friendly merkle roots, used by auxiliary SNARKs
+    mapping(uint256 => bytes32) private auxiliaryRoots;
+
+    /// @dev whether auth checks should run on aux root queries
+    bool private needsAuth;
+
+    event ImportMerkleRoot(uint256 indexed index, bytes32 merkleRoot, bytes32 auxiliaryRoot);
     event NewSigner(address newSigner);
 
     enum ProofType {
@@ -73,19 +83,31 @@ contract BlockHistory is Ownable, IBlockHistory {
     }
 
     /// @dev A SNARK + Merkle proof used to prove validity of a block
-    struct ValidBlockSNARK {
+    struct MerkleSNARKProof {
         uint256 numBlocks;
         uint256 endBlock;
         SignedRecursiveProof snark;
         bytes32[] merkleProof;
     }
 
+    struct ProofInputs {
+        bytes32 parent;
+        bytes32 last;
+        bytes32 merkleRoot;
+        bytes32 auxiliaryRoot;
+    }
+
     constructor(
         uint256[] memory sizes,
         IRecursiveVerifier[] memory _verifiers,
         address _reliquary
-    ) Ownable() {
+    ) AccessControl() {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(ADMIN_ROLE, msg.sender);
+        _setupRole(QUERY_ROLE, msg.sender);
+
         reliquary = _reliquary;
+        signer = msg.sender;
 
         require(sizes.length == _verifiers.length);
         for (uint256 i = 0; i < sizes.length; i++) {
@@ -124,22 +146,26 @@ contract BlockHistory is Ownable, IBlockHistory {
      *         the provied merkle roots.
      *
      * @param proof the aggregated proof
-     * @param roots the merkle roots
-     * @return parent the parentHash of the proof blocks
-     * @return last the lastHash of the proof blocks
+     * @param roots the block merkle roots
+     * @param aux the auxiliary merkle roots
+     * @return inputs the proof inputs
      */
     function assertValidSNARKWithRoots(
         SignedRecursiveProof calldata proof,
-        bytes32[] calldata roots
-    ) internal view returns (bytes32 parent, bytes32 last) {
+        bytes32[] calldata roots,
+        bytes32[] calldata aux
+    ) internal view returns (ProofInputs memory inputs) {
         require(roots.length & (roots.length - 1) == 0, "roots length must be a power of 2");
+        require(roots.length == aux.length, "roots arrays must be same length");
 
         // extract the inputs from the proof
-        bytes32 proofRoot;
-        (parent, last, proofRoot) = parseProofInputs(proof);
+        inputs = parseProofInputs(proof);
 
         // ensure the merkle roots are valid
-        require(proofRoot == MerkleTree.computeRoot(roots), "invalid roots");
+        require(inputs.merkleRoot == MerkleTree.computeRoot(roots), "invalid block roots");
+
+        // ensure the auxiliary merkle roots are valid
+        require(inputs.auxiliaryRoot == AuxMerkleTree.computeRoot(aux), "invalid aux roots");
 
         // assert the SNARK proof is valid
         require(validSNARK(proof, BLOCKS_PER_CHUNK * roots.length), "invalid SNARK");
@@ -151,7 +177,7 @@ contract BlockHistory is Ownable, IBlockHistory {
      *
      * @param num the block number to check
      * @param hash the block hash to check
-     * @param encodedProof the encoded ValidBlockSNARK
+     * @param encodedProof the encoded MerkleSNARKProof
      * @return the validity
      */
     function validBlockHashWithSNARK(
@@ -159,12 +185,12 @@ contract BlockHistory is Ownable, IBlockHistory {
         uint256 num,
         bytes calldata encodedProof
     ) internal view returns (bool) {
-        ValidBlockSNARK calldata proof = parseValidBlockSNARK(encodedProof);
+        MerkleSNARKProof calldata proof = parseMerkleSNARKProof(encodedProof);
 
-        (bytes32 proofParent, bytes32 proofLast, bytes32 proofRoot) = parseProofInputs(proof.snark);
+        ProofInputs memory inputs = parseProofInputs(proof.snark);
 
         // check that the proof ends with a current block
-        if (!validCurrentBlock(proofLast, proof.endBlock)) {
+        if (!validCurrentBlock(inputs.last, proof.endBlock)) {
             return false;
         }
 
@@ -176,14 +202,14 @@ contract BlockHistory is Ownable, IBlockHistory {
         uint256 startBlock = proof.endBlock + 1 - proof.numBlocks;
 
         // check if the target block is the parent of the proven blocks
-        if (num == startBlock - 1 && hash == proofParent) {
+        if (num == startBlock - 1 && hash == inputs.parent) {
             // merkle proof not needed in this case
             return true;
         }
 
         // check if the target block is in the proven merkle root
         uint256 index = num - startBlock;
-        return MerkleTree.validProof(proofRoot, index, hash, proof.merkleProof);
+        return MerkleTree.validProof(inputs.merkleRoot, index, hash, proof.merkleProof);
     }
 
     /**
@@ -229,12 +255,19 @@ contract BlockHistory is Ownable, IBlockHistory {
      * @notice Stores the merkle roots starting at the index
      *
      * @param index the index for the first merkle root
-     * @param roots the merkle roots
+     * @param roots the merkle roots of the block hashes
+     * @param aux the auxiliary merkle roots of the block hashes
      */
-    function storeMerkleRoots(uint256 index, bytes32[] calldata roots) internal {
+    function storeMerkleRoots(
+        uint256 index,
+        bytes32[] calldata roots,
+        bytes32[] calldata aux
+    ) internal {
         for (uint256 i = 0; i < roots.length; i++) {
-            merkleRoots[index + i] = roots[i];
-            emit ImportMerkleRoot(index + i, roots[i]);
+            uint256 idx = index + i;
+            merkleRoots[idx] = roots[i];
+            auxiliaryRoots[idx] = aux[i];
+            emit ImportMerkleRoot(idx, roots[i], aux[i]);
         }
     }
 
@@ -242,22 +275,27 @@ contract BlockHistory is Ownable, IBlockHistory {
      * @notice Imports new chunks of blocks before the current parentHash
      *
      * @param proof the aggregated proof for these chunks
-     * @param roots the merkle roots for the chunks
+     * @param roots the merkle roots for the block hashes
+     * @param aux the auxiliary roots for the block hashes
      */
-    function importParent(SignedRecursiveProof calldata proof, bytes32[] calldata roots) external {
+    function importParent(
+        SignedRecursiveProof calldata proof,
+        bytes32[] calldata roots,
+        bytes32[] calldata aux
+    ) external {
         require(parentHash != 0 && earliestRoot != 0, "import not started or already completed");
 
-        (bytes32 proofParent, bytes32 proofLast) = assertValidSNARKWithRoots(proof, roots);
+        ProofInputs memory inputs = assertValidSNARKWithRoots(proof, roots, aux);
 
         // assert the last hash in the proof is our current parent hash
-        require(parentHash == proofLast, "proof doesn't connect with parentHash");
+        require(parentHash == inputs.last, "proof doesn't connect with parentHash");
 
         // store the merkle roots
         uint256 index = earliestRoot - roots.length;
-        storeMerkleRoots(index, roots);
+        storeMerkleRoots(index, roots, aux);
 
         // store the new parentHash and earliestRoot
-        parentHash = proofParent;
+        parentHash = inputs.parent;
         earliestRoot = index;
     }
 
@@ -266,7 +304,7 @@ contract BlockHistory is Ownable, IBlockHistory {
      *
      * @param endBlock the last block number in the chunks
      * @param proof the aggregated proof for these chunks
-     * @param roots the merkle roots for the chunks
+     * @param roots the merkle roots for the block hashes
      * @param connectProof an optional SNARK proof connecting the proof to
      *                     a current block
      */
@@ -274,17 +312,18 @@ contract BlockHistory is Ownable, IBlockHistory {
         uint256 endBlock,
         SignedRecursiveProof calldata proof,
         bytes32[] calldata roots,
+        bytes32[] calldata aux,
         bytes calldata connectProof
     ) external {
         require((endBlock + 1) % BLOCKS_PER_CHUNK == 0, "endBlock must end at a chunk boundary");
 
-        (bytes32 proofParent, bytes32 proofLast) = assertValidSNARKWithRoots(proof, roots);
+        ProofInputs memory inputs = assertValidSNARKWithRoots(proof, roots, aux);
 
-        if (!validCurrentBlock(proofLast, endBlock)) {
+        if (!validCurrentBlock(inputs.last, endBlock)) {
             // if the proof doesn't connect our lastHash with a current block,
             // then the connectProof must fill the gap
             require(
-                validBlockHashWithSNARK(proofLast, endBlock, connectProof),
+                validBlockHashWithSNARK(inputs.last, endBlock, connectProof),
                 "connectProof invalid"
             );
         }
@@ -293,17 +332,17 @@ contract BlockHistory is Ownable, IBlockHistory {
         if (lastHash == 0) {
             // if we're importing for the first time, set parentHash and earliestRoot
             require(parentHash == 0);
-            parentHash = proofParent;
+            parentHash = inputs.parent;
             earliestRoot = index;
         } else {
-            require(proofParent == lastHash, "proof doesn't connect with lastHash");
+            require(inputs.parent == lastHash, "proof doesn't connect with lastHash");
         }
 
         // store the new lastHash
-        lastHash = proofLast;
+        lastHash = inputs.last;
 
         // store the merkle roots
-        storeMerkleRoots(index, roots);
+        storeMerkleRoots(index, roots, aux);
     }
 
     /**
@@ -351,9 +390,32 @@ contract BlockHistory is Ownable, IBlockHistory {
         uint256 num,
         bytes calldata proof
     ) external view returns (bool) {
-        require(msg.sender == reliquary || msg.sender == owner());
+        require(msg.sender == reliquary || hasRole(QUERY_ROLE, msg.sender));
         require(num < block.number);
         return _validBlockHash(hash, num, proof);
+    }
+
+    /**
+     * @notice Queries an auxRoot
+     *
+     * @dev only authorized addresses can call this
+     * @param idx the index of the root to query
+     */
+    function auxRoots(uint256 idx) external view returns (bytes32 root) {
+        if (needsAuth) {
+            _checkRole(QUERY_ROLE);
+        }
+        root = auxiliaryRoots[idx];
+    }
+
+    /**
+     * @notice sets the needsAuth flag which controls auxRoot query auth checks
+     *
+     * @dev only the owner can call this
+     * @param _needsAuth the new value
+     */
+    function setNeedsAuth(bool _needsAuth) external onlyRole(ADMIN_ROLE) {
+        needsAuth = _needsAuth;
     }
 
     /**
@@ -374,15 +436,15 @@ contract BlockHistory is Ownable, IBlockHistory {
     }
 
     /**
-     * @notice Parses a ValidBlockSNARK from calldata bytes
+     * @notice Parses a MerkleSNARKProof from calldata bytes
      *
      * @param proof the encoded proof
-     * @return result a ValidBlockSNARK
+     * @return result a MerkleSNARKProof
      */
-    function parseValidBlockSNARK(bytes calldata proof)
+    function parseMerkleSNARKProof(bytes calldata proof)
         internal
         pure
-        returns (ValidBlockSNARK calldata result)
+        returns (MerkleSNARKProof calldata result)
     {
         // solidity doesn't support getting calldata outputs from abi.decode
         // but we can decode it; calldata structs are just offsets
@@ -417,24 +479,21 @@ contract BlockHistory is Ownable, IBlockHistory {
      * @notice Parses the proof inputs for block history snark proofs
      *
      * @param proof the snark proof
-     * @return proofParent the parentHash of the proof blocks
-     * @return proofLast the lastHash of the proof blocks
-     * @return proofRoot the merkle root of the proof blocks
+     * @return result the parsed proof inputs
      */
     function parseProofInputs(SignedRecursiveProof calldata proof)
         internal
         pure
-        returns (
-            bytes32 proofParent,
-            bytes32 proofLast,
-            bytes32 proofRoot
-        )
+        returns (ProofInputs memory result)
     {
         uint256[] calldata inputs = proof.inner.inputs;
-        require(inputs.length == 12);
-        proofParent = readHashWords(inputs[0:4]);
-        proofLast = readHashWords(inputs[4:8]);
-        proofRoot = readHashWords(inputs[8:12]);
+        require(inputs.length == 13);
+        result = ProofInputs(
+            readHashWords(inputs[0:4]),
+            readHashWords(inputs[4:8]),
+            readHashWords(inputs[8:12]),
+            bytes32(inputs[12])
+        );
     }
 
     /**
@@ -443,7 +502,7 @@ contract BlockHistory is Ownable, IBlockHistory {
      *
      * @param _signer the new signer; if 0, disables signature checks
      */
-    function setSigner(address _signer) external onlyOwner {
+    function setSigner(address _signer) external onlyRole(ADMIN_ROLE) {
         require(signer != _signer);
         signer = _signer;
         emit NewSigner(_signer);

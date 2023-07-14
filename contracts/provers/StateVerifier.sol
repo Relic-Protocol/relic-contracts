@@ -228,6 +228,34 @@ contract StateVerifier {
     }
 
     /**
+     * @notice verifies the presence of a transaction in the given block at txIdx
+     *         using the provided proofs. Reverts if the transaction doesn't exist or if
+     *         the proofs are invalid.
+     *
+     * @param txIdx the transaction index in the block
+     * @param transactionProof the Merkle-Patricia trie proof for the transaction's hash
+     * @param header the block header, RLP encoded
+     * @param blockProof proof that the block header is valid
+     * @return head the parsed block header
+     * @return txHash the hash of the transaction proven
+     */
+    function verifyTransactionAtBlock(
+        uint256 txIdx,
+        bytes calldata transactionProof,
+        bytes calldata header,
+        bytes calldata blockProof
+    ) internal view returns (CoreTypes.BlockHeaderData memory head, bytes32 txHash) {
+        head = verifyBlockHeader(header, blockProof);
+        (bool exists, bytes calldata txData) = verifyIndexedTrieProof(
+            txIdx,
+            transactionProof,
+            head.TxHash
+        );
+        require(exists, "transaction does not exist in given block");
+        txHash = keccak256(txData);
+    }
+
+    /**
      * @notice verifies a withdrawal occurred in the given block using the
      *         provided proofs. Reverts if the withdrawal doesn't exist or
      *         if the proofs are invalid.

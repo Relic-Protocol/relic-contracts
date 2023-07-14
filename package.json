@@ -1,37 +1,28 @@
 {
   "name": "relic",
   "devDependencies": {
-    "@nomicfoundation/hardhat-network-helpers": "^1.0.6",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.8",
     "@nomiclabs/hardhat-ethers": "npm:hardhat-deploy-ethers@^0.3.0-beta.13",
-    "@nomiclabs/hardhat-waffle": "^2.0.3",
     "chai": "^4.3.6",
     "ethereum-waffle": "^3.4.4",
-    "ethers": "^5.7.0",
-    "hardhat": "^2.10.1",
     "hardhat-gas-reporter": "^1.0.8",
     "hardhat-prettier": "^0.0.1",
-    "prettier": "^2.3.1",
     "prettier-plugin-solidity": "^1.0.0-beta.24",
     "solc": ">=0.8.12",
     "solidity-coverage": "^0.7.21"
   },
   "dependencies": {
+    "@nomicfoundation/hardhat-ethers": "^3.0.3",
+    "@nomiclabs/hardhat-waffle": "^2.0.6",
     "@openzeppelin/contracts": "^4.7.3",
     "core-js": "^3.25.0",
     "dotenv": "^16.0.2",
+    "ethers": "^5.7.2",
     "flat-cache": "^3.0.4",
+    "hardhat": "^2.16.1",
     "hardhat-deploy": "^0.11.12",
     "node-fetch": "^2.6.7",
     "rlp": "^3.0.0",
     "sqlite3": "^5.0.11"
-  },
-  "overrides": {
-    "@solidity-parser/parser": "https://github.com/tim-becker/parser",
-    "@nomiclabs/hardhat-waffle": {
-      "@nomiclabs/hardhat-ethers": "$@nomiclabs/hardhat-ethers"
-    },
-    "hardhat-prettier": {
-      "prettier-plugin-solidity": "^1.0.0-beta.24"
-    }
   }
 }

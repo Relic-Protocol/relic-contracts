@@ -29,7 +29,7 @@ contract BlockHistoryForTesting is BlockHistory {
      * @param parent the parentHash
      * @param last the lastHash
      */
-    function setHashesForTesting(bytes32 parent, bytes32 last) external onlyOwner {
+    function setHashesForTesting(bytes32 parent, bytes32 last) external onlyRole(ADMIN_ROLE) {
         parentHash = parent;
         lastHash = last;
     }
@@ -40,7 +40,7 @@ contract BlockHistoryForTesting is BlockHistory {
      *
      * @param num the new earliestRoot
      */
-    function setEarliestRootForTesting(uint256 num) external onlyOwner {
+    function setEarliestRootForTesting(uint256 num) external onlyRole(ADMIN_ROLE) {
         earliestRoot = num;
     }
 
@@ -49,13 +49,15 @@ contract BlockHistoryForTesting is BlockHistory {
      *         only callable if deploy contract is for testing
      *
      * @param index the index for the first merkle root
-     * @param roots the merkle roots
+     * @param roots the block merkle roots
+     * @param aux the auxiliary roots
      */
-    function storeMerkleRootsForTesting(uint256 index, bytes32[] calldata roots)
-        external
-        onlyOwner
-    {
-        storeMerkleRoots(index, roots);
+    function storeMerkleRootsForTesting(
+        uint256 index,
+        bytes32[] calldata roots,
+        bytes32[] calldata aux
+    ) external onlyRole(ADMIN_ROLE) {
+        storeMerkleRoots(index, roots, aux);
     }
 
     /**
@@ -70,7 +72,7 @@ contract BlockHistoryForTesting is BlockHistory {
         bytes32 hash,
         uint256 num,
         bytes calldata proof
-    ) external view onlyOwner {
+    ) external view onlyRole(ADMIN_ROLE) {
         require(_validBlockHash(hash, num, proof), "invalid block hash");
     }
 }

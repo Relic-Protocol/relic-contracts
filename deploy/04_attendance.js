@@ -1,6 +1,10 @@
 const { ethers } = require("hardhat");
 
 module.exports = async ({getNamedAccounts, deployments}) => {
+    if (network.zksync === true) {
+        return;
+    }
+
     const {deploy} = deployments;
     const {deployer} = await getNamedAccounts();
     const reliquary = await ethers.getContract("Reliquary");

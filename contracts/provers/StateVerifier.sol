@@ -4,7 +4,6 @@
 
 pragma solidity >=0.8.12;
 
-import "../BlockHistory.sol";
 import "../interfaces/IReliquary.sol";
 import "../lib/BytesCalldata.sol";
 import "../lib/CoreTypes.sol";
@@ -20,10 +19,10 @@ import "../lib/MPT.sol";
 contract StateVerifier {
     using BytesCalldataOps for bytes;
 
-    BlockHistory public immutable blockHistory;
+    address public immutable blockHistory;
     IReliquary private immutable reliquary;
 
-    constructor(BlockHistory _blockHistory, IReliquary _reliquary) {
+    constructor(address _blockHistory, IReliquary _reliquary) {
         blockHistory = _blockHistory;
         reliquary = _reliquary;
     }

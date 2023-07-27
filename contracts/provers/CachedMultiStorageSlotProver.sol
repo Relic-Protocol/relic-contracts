@@ -20,7 +20,7 @@ import "../lib/FactSigs.sol";
 contract CachedMultiStorageSlotProver is BatchProver, StateVerifier {
     constructor(BlockHistory blockHistory, IReliquary _reliquary)
         BatchProver(_reliquary)
-        StateVerifier(blockHistory, _reliquary)
+        StateVerifier(address(blockHistory), _reliquary)
     {}
 
     struct CachedMultiStorageSlotProof {

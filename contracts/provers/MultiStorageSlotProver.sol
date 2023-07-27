@@ -6,7 +6,6 @@ pragma solidity >=0.8.12;
 
 import "../interfaces/IReliquary.sol";
 import "../RelicToken.sol";
-import "../BlockHistory.sol";
 import "./BatchProver.sol";
 import "./StateVerifier.sol";
 import "../lib/FactSigs.sol";
@@ -18,7 +17,7 @@ import "../lib/FactSigs.sol";
  *         at a particular block.
  */
 contract MultiStorageSlotProver is BatchProver, StateVerifier {
-    constructor(BlockHistory blockHistory, IReliquary _reliquary)
+    constructor(address blockHistory, IReliquary _reliquary)
         BatchProver(_reliquary)
         StateVerifier(blockHistory, _reliquary)
     {}

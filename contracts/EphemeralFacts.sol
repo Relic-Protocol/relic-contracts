@@ -27,10 +27,23 @@ contract EphemeralFacts is IEphemeralFacts {
     IReliquary immutable reliquary;
 
     /// @dev track the bounty associated with each fact request
-    mapping(bytes32 => uint256) bounties;
+    mapping(bytes32 => uint256) public bounties;
+
+    /// @dev track the collected bounties for the fact relayers
+    mapping(address => uint256) public balance;
 
     constructor(IReliquary _reliquary) {
         reliquary = _reliquary;
+    }
+
+    /**
+     * @dev collects the accumulated bounties for the caller
+     */
+    function collect() external {
+        uint256 amount = balance[msg.sender];
+        delete balance[msg.sender];
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "bounty transfer failed");
     }
 
     /**
@@ -43,7 +56,7 @@ contract EphemeralFacts is IEphemeralFacts {
         address account,
         FactSignature sig,
         ReceiverContext memory context
-    ) internal pure returns (bytes32) {
+    ) public pure returns (bytes32) {
         return keccak256(abi.encode(account, sig, context));
     }
 
@@ -61,8 +74,8 @@ contract EphemeralFacts is IEphemeralFacts {
         );
         if (bounty > 0) {
             delete bounties[rid];
-            emit BountyPaid(bounty, rid, msg.sender);
-            payable(msg.sender).transfer(bounty);
+            emit BountyClaimed(msg.sender, rid, bounty);
+            balance[msg.sender] += bounty;
         }
         bytes memory data = abi.encodeWithSelector(
             IRelicReceiver.receiveFact.selector,

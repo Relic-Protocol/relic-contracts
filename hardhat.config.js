@@ -1,3 +1,5 @@
+const path = require("path");
+
 require("dotenv").config();
 require("@nomiclabs/hardhat-waffle");
 require("@nomiclabs/hardhat-ethers");
@@ -6,6 +8,9 @@ require("solidity-coverage");
 require("hardhat-deploy");
 require("hardhat-prettier");
 require("ethers");
+require("@matterlabs/hardhat-zksync-deploy");
+require("@matterlabs/hardhat-zksync-solc");
+require("@matterlabs/hardhat-zksync-verify");
 
 // for older node without array.at
 require("core-js/features/array/at");
@@ -13,7 +18,8 @@ require("core-js/features/array/at");
 let { execFileSync } = require("child_process");
 let {
   TASK_COMPILE_GET_COMPILATION_TASKS,
-  TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD
+  TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD,
+  TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS
 } = require("hardhat/builtin-tasks/task-names");
 
 let TASK_BUILD_VERIFIER = "compile:build-verifier";
@@ -58,6 +64,15 @@ subtask(TASK_COMPILE_GET_COMPILATION_TASKS, "hooked to build yul verifier")
     return tasks;
   });
 
+subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS)
+  .setAction(async (args, hre, runSuper) => {
+    if (hre.network.zksync === true) {
+      // only includes source files in zkSync directory
+      const sourcePath = args.sourcePath ?? hre.config.paths.sources;
+      args = {...args, sourcePath: path.join(sourcePath, "zksync") };
+    }
+    return await runSuper(args);
+  });
 
 // This is a sample Hardhat task. To learn how to create your own go to
 // https://hardhat.org/guides/create-task.html
@@ -88,6 +103,11 @@ module.exports = {
       }
     }
   },
+  zksolc: {
+    version: "1.3.5",
+    compilerSource: "binary",
+    settings: {},
+  },
   mocha: {
     timeout: 10000000
   },
@@ -95,12 +115,14 @@ module.exports = {
      sepolia: {
       url: SEPOLIA_RPC_URL,
       accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
+      zksync: false,
     },
     mainnet: {
       url: MAINNET_RPC_URL,
       accounts:
         (MAINNET_PRIVKEY.length ? [ MAINNET_PRIVKEY ] : [])
-          .concat(SIGNING_PRIVKEY.length ? [ SIGNING_PRIVKEY ] : [])
+          .concat(SIGNING_PRIVKEY.length ? [ SIGNING_PRIVKEY ] : []),
+      zksync: false,
     },
     hardhat: {
       forking: {
@@ -108,9 +130,23 @@ module.exports = {
         blockNumber: 17055744,
       },
       saveDeployments: true,
+      zksync: false,
     },
     localhost: {
-        url: "http://localhost:8545/"
+      url: "http://localhost:8545/",
+      zksync: false,
+    },
+    zkTestnet: {
+      url: "https://zksync2-testnet.zksync.dev",
+      ethNetwork: process.env.GOERLI_RPC_URL || "[set GOERLI_RPC_URL]",
+      verifyURL: 'https://zksync2-testnet-explorer.zksync.dev/contract_verification',
+      zksync: true,
+    },
+    zkMainnet: {
+      url: "https://mainnet.era.zksync.io",
+      ethNetwork: process.env.MAINNET_RPC_URL || "[set MAINNET_RPC_URL]",
+      verifyURL: 'https://zksync2-mainnet-explorer.zksync.io/contract_verification',
+      zksync: true,
     }
   },
   namedAccounts: {

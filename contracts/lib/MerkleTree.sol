@@ -47,20 +47,18 @@ library MerkleTree {
 
     /**
      * @notice check if a hash is in the merkle tree for rootHash
-     * @param rootHash the merkle root
      * @param index the index of the node to check
      * @param hash the hash to check
      * @param proofHashes the proof, i.e. the sequence of siblings from the
      *        node to root
      */
-    function validProof(
-        bytes32 rootHash,
+    function proofRoot(
         uint256 index,
         bytes32 hash,
         bytes32[] memory proofHashes
-    ) internal view returns (bool result) {
+    ) internal view returns (bytes32 result) {
         assembly {
-            let constructedHash := hash
+            result := hash
             let length := mload(proofHashes)
             let start := add(proofHashes, 0x20)
             let end := add(start, mul(length, 0x20))
@@ -74,23 +72,39 @@ library MerkleTree {
                 // use scratch space (0x0 - 0x40) for hash input
                 switch and(index, 1)
                 case 0 {
-                    mstore(0x0, constructedHash)
+                    mstore(0x0, result)
                     mstore(0x20, proofHash)
                 }
                 case 1 {
                     mstore(0x0, proofHash)
-                    mstore(0x20, constructedHash)
+                    mstore(0x20, result)
                 }
 
                 // compute sha256
                 if iszero(staticcall(gas(), 0x2, 0x0, 0x40, 0x0, 0x20)) {
                     revert(0, 0)
                 }
-                constructedHash := mload(0x0)
+                result := mload(0x0)
 
                 index := shr(1, index)
             }
-            result := eq(constructedHash, rootHash)
         }
+    }
+
+    /**
+     * @notice check if a hash is in the merkle tree for rootHash
+     * @param rootHash the merkle root
+     * @param index the index of the node to check
+     * @param hash the hash to check
+     * @param proofHashes the proof, i.e. the sequence of siblings from the
+     *        node to root
+     */
+    function validProof(
+        bytes32 rootHash,
+        uint256 index,
+        bytes32 hash,
+        bytes32[] memory proofHashes
+    ) internal view returns (bool result) {
+        return rootHash == proofRoot(index, hash, proofHashes);
     }
 }

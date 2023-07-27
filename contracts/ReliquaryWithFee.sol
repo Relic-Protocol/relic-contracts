@@ -427,7 +427,8 @@ contract ReliquaryWithFee is Reliquary {
         require(dest != address(0));
 
         if (token == address(0)) {
-            dest.transfer(address(this).balance);
+            (bool success, ) = address(dest).call{value: address(this).balance}("");
+            require(success, "native transfer failed");
         } else {
             IERC20(token).transfer(dest, IERC20(token).balanceOf(address(this)));
         }

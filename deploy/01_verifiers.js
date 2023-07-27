@@ -1,8 +1,12 @@
 const fetch = require('node-fetch');
-const { config, ethers } = require("hardhat");
+const { config, ethers, network } = require("hardhat");
 const { readFileSync } = require("fs");
 
 module.exports = async ({getNamedAccounts, deployments}) => {
+    if (network.zksync === true) {
+        return;
+    }
+
     const {deploy} = deployments;
     const {deployer} = await getNamedAccounts();
 
@@ -23,7 +27,7 @@ module.exports = async ({getNamedAccounts, deployments}) => {
         }
 
         await deploy(`Verifier-${sizes[i]}`, {
-            contract: "Verifier",
+            contract: "contracts/Verifier.yul:Verifier",
             from: deployer,
             args: [vk],
             log: true,

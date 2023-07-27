@@ -26,7 +26,7 @@ interface IEphemeralFacts {
 
     event ReceiveFailure(IRelicReceiver receiver, bytes32 requestId);
 
-    event BountyPaid(uint256 bounty, bytes32 requestId, address relayer);
+    event BountyClaimed(address indexed relayer, bytes32 indexed requestId, uint256 bounty);
 
     /**
      * @notice proves a fact ephemerally and provides it to the receiver

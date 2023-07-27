@@ -7,7 +7,6 @@ pragma solidity >=0.8.12;
 import "../interfaces/IReliquary.sol";
 import "../lib/FactSigs.sol";
 import "../RelicToken.sol";
-import "../BlockHistory.sol";
 import "./Prover.sol";
 import "./StateVerifier.sol";
 
@@ -17,7 +16,7 @@ import "./StateVerifier.sol";
  * @notice TransactionProver proves that a transaction hash occurred in a block.
  */
 contract TransactionProver is Prover, StateVerifier {
-    constructor(BlockHistory blockHistory, IReliquary _reliquary)
+    constructor(address blockHistory, IReliquary _reliquary)
         Prover(_reliquary)
         StateVerifier(blockHistory, _reliquary)
     {}

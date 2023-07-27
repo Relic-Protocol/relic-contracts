@@ -175,7 +175,7 @@ describe("Blocks", function () {
         for (var i = 0; i < sizes.length; i++) {
             let vkRaw = readFileSync(`test/data/rendered-vk-outer-${sizes[i] / 16}`);
             const [vk] = defaultAbiCoder.decode(["uint256[35]"], vkRaw);
-            const Verifier = await ethers.getContractFactory("Verifier");
+            const Verifier = await ethers.getContractFactory("contracts/Verifier.yul:Verifier");
             const verifier = await Verifier.deploy(vk);
             await verifier.deployed();
             verifiers.push(verifier.address);
@@ -1362,8 +1362,8 @@ describe("Reliquary", function () {
 
         // should fail because context.extra is not correct
         await expect(tx).to.emit(ephemeralFacts, "ReceiveFailure");
-        // but should still pay the bounty
-        await expect(tx).to.emit(ephemeralFacts, "BountyPaid");
+        // but should still claim the bounty
+        await expect(tx).to.emit(ephemeralFacts, "BountyClaimed");
 
         let after = await ethers.provider.getBalance(addr);
         await expect(after.sub(before).div(ETHER.div(10)).toNumber()).to.be.greaterThanOrEqual(0);

@@ -6,7 +6,6 @@ pragma solidity >=0.8.12;
 
 import "../interfaces/IReliquary.sol";
 import "../RelicToken.sol";
-import "../BlockHistory.sol";
 import "./StateVerifier.sol";
 import "./Prover.sol";
 import "../lib/FactSigs.sol";
@@ -29,7 +28,7 @@ contract BirthCertificateProver is Prover, StateVerifier {
     }
 
     constructor(
-        BlockHistory blockHistory,
+        address blockHistory,
         IReliquary _reliquary,
         RelicToken _token
     ) Prover(_reliquary) StateVerifier(blockHistory, _reliquary) {

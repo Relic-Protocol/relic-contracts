@@ -71,15 +71,20 @@ contract BlockHistory is AccessControl, IBlockHistory {
     /// @dev ZK-Friendly merkle roots, used by auxiliary SNARKs
     mapping(uint256 => bytes32) private auxiliaryRoots;
 
+    /// @dev mapping of precomitted block hashes
+    mapping(uint256 => bytes32) private precomitted;
+
     /// @dev whether auth checks should run on aux root queries
     bool private needsAuth;
 
     event ImportMerkleRoot(uint256 indexed index, bytes32 merkleRoot, bytes32 auxiliaryRoot);
+    event PrecomittedBlock(uint256 indexed blockNum, bytes32 blockHash);
     event NewSigner(address newSigner);
 
     enum ProofType {
         Merkle,
-        SNARK
+        SNARK,
+        Precomitted
     }
 
     /// @dev A SNARK + Merkle proof used to prove validity of a block
@@ -238,6 +243,17 @@ contract BlockHistory is AccessControl, IBlockHistory {
     }
 
     /**
+     * @notice Checks if the block is a valid precomitted block.
+     *
+     * @param hash the alleged block hash
+     * @param num the block number
+     */
+    function validPrecomittedBlock(bytes32 hash, uint256 num) internal view returns (bool) {
+        bytes32 stored = precomitted[num];
+        return stored != bytes32(0) && stored == hash;
+    }
+
+    /**
      * @notice Checks if the block is a current block (defined as being
      *         accessible in the EVM, i.e. <= 256 blocks old) and that the hash
      *         is correct.
@@ -345,6 +361,16 @@ contract BlockHistory is AccessControl, IBlockHistory {
         storeMerkleRoots(index, roots, aux);
     }
 
+    function _storeCommittedBlock(uint256 blockNum, bytes32 blockHash) internal {
+        require(blockHash != bytes32(0), "invalid blockhash");
+        precomitted[blockNum] = blockHash;
+        emit PrecomittedBlock(blockNum, blockHash);
+    }
+
+    function commitRecent(uint256 blockNum) external {
+        _storeCommittedBlock(blockNum, blockhash(blockNum));
+    }
+
     /**
      * @notice Checks if a block hash is valid. A proof is required unless the
      *         block is current (accesible in the EVM). If the target block has
@@ -370,6 +396,8 @@ contract BlockHistory is AccessControl, IBlockHistory {
             return validBlockHashWithMerkle(hash, num, proof);
         } else if (typ == ProofType.SNARK) {
             return validBlockHashWithSNARK(hash, num, proof);
+        } else if (typ == ProofType.Precomitted) {
+            return validPrecomittedBlock(hash, num);
         } else {
             revert("invalid proof type");
         }

@@ -3,7 +3,7 @@ const { config, ethers, network } = require("hardhat");
 const { readFileSync } = require("fs");
 
 module.exports = async ({getNamedAccounts, deployments}) => {
-    if (network.zksync === true) {
+    if (network.config.bridged === true || network.config.l2Native === true) {
         return;
     }
 

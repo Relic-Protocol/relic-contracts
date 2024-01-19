@@ -123,6 +123,11 @@ contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
         return MerkleTree.validProof(merkleRoot, num % BLOCKS_PER_CHUNK, hash, proofHashes);
     }
 
+    function _importTrustedHash(uint256 number, bytes32 hash) internal {
+        emit TrustedBlockHash(number, hash);
+        trusted[number] = hash;
+    }
+
     /**
      * @notice Import a trusted block hash from the messenger
      * @param number the block number to import
@@ -130,8 +135,7 @@ contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
      */
     function importTrustedHash(uint256 number, bytes32 hash) external {
         require(msg.sender == messenger, "only the L1 messenger can import trusted block hashes");
-        emit TrustedBlockHash(number, hash);
-        trusted[number] = hash;
+        _importTrustedHash(number, hash);
     }
 
     /**

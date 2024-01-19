@@ -1,7 +1,7 @@
 const { ethers } = require("hardhat");
 
 module.exports = async ({getNamedAccounts, deployments}) => {
-    if (network.zksync === true) {
+    if (network.config.bridged === true || network.config.optimism === true) {
         return;
     }
 

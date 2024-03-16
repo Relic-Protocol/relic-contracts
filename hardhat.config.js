@@ -6,7 +6,7 @@ require("@nomiclabs/hardhat-ethers");
 require("hardhat-gas-reporter");
 require("solidity-coverage");
 require("hardhat-deploy");
-require("ethers");
+const ethers = require("ethers");
 require("@matterlabs/hardhat-zksync-deploy");
 require("@matterlabs/hardhat-zksync-solc");
 require("@matterlabs/hardhat-zksync-verify");
@@ -20,6 +20,7 @@ let {
   TASK_COMPILE_SOLIDITY_GET_SOLC_BUILD,
   TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS
 } = require("hardhat/builtin-tasks/task-names");
+const { DEFAULT_L2_CONTRACT_ADDRESSES } = require("@eth-optimism/sdk");
 
 let TASK_BUILD_VERIFIER = "compile:build-verifier";
 
@@ -79,6 +80,9 @@ const SIGNING_PRIVKEY = process.env.SIGNING_PRIVKEY || "";
 const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL || "";
 const SEPOLIA_PRIVKEY = process.env.SEPOLIA_PRIVKEY || "";
 
+const MAINNET_BEACON_URL = process.env.MAINNET_BEACON_URL || "";
+const SEPOLIA_BEACON_URL = process.env.SEPOLIA_BEACON_URL || "";
+
 /**
  * @type import("hardhat/config").HardhatUserConfig
  */
@@ -101,17 +105,23 @@ module.exports = {
     timeout: 10000000
   },
   networks: {
-     sepolia: {
+    sepolia: {
       url: SEPOLIA_RPC_URL,
       accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
       zksync: false,
       companionNetworks: {
         zkSync: "zkTestnet",
         optimism: "opSepolia",
-        base: "baseSepolia"
+        base: "baseSepolia",
+        blast: "blastSepolia"
       },
       backendUrl: 'https://api.sepolia.relicprotocol.com/v1/',
       proverUrl: 'https://api.sepolia.relicprotocol.com/v1/',
+      beaconUrl: SEPOLIA_BEACON_URL,
+      capellaSlot: 1818624,
+      denebSlot: 4243456,
+      upgradeBlock: 5185536,
+      beaconOracleContract: "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02"
     },
     mainnet: {
       url: MAINNET_RPC_URL,
@@ -126,6 +136,11 @@ module.exports = {
       },
       backendUrl: 'https://api.mainnet.relicprotocol.com/v1/',
       proverUrl: 'https://api.mainnet.relicprotocol.com/v1/',
+      beaconUrl: MAINNET_BEACON_URL,
+      capellaSlot: 6209536,
+      denebSlot: 8626176,
+      upgradeBlock: 19423232,
+      beaconOracleContract: "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02"
     },
     hardhat: {
       forking: {
@@ -137,17 +152,28 @@ module.exports = {
       companionNetworks: {
         zkSync: "zkMainnet",
         optimism: "opMainnet",
-        base: "baseMainnet"
-      }
+        base: "baseMainnet",
+        blast: "blastSepolia"
+      },
+      capellaSlot: 0,
+      denebSlot: 0,
+      upgradeBlock: 0, // TODO
+      beaconOracleContract: "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02"
     },
     localhost: {
       url: "http://localhost:8545/",
       zksync: false,
+      accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
       companionNetworks: {
-        zkSync: "zkMainnet",
-        optimism: "opMainnet",
-        base: "baseMainnet"
-      }
+        zkSync: "zkTestnet",
+        optimism: "opSepolia",
+        base: "baseSepolia"
+      },
+      beaconUrl: SEPOLIA_BEACON_URL,
+      capellaSlot: 1818624,
+      denebSlot: 4243456,
+      upgradeBlock: 5185536,
+      beaconOracleContract: "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02"
     },
     zkTestnet: {
       url: process.env.ZKSYNC_ERA_SEPOLIA_RPC_URL || "https://sepolia.era.zksync.dev/",
@@ -217,6 +243,30 @@ module.exports = {
         l1: "sepolia"
       }
     },
+    blastSepolia: {
+      url: process.env.BLAST_SEPOLIA_RPC_URL || "https://sepolia.blast.io",
+      ethNetwork: process.env.SEPOLIA_RPC_URL || "[set SEPOLIA_RPC_URL]",
+      accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
+      bridged: true,
+      optimism: true,
+      portal: "0x2757E4430e694F27b73EC9C02257cab3a498C8C5",
+      companionNetworks: {
+        l1: "sepolia"
+      },
+      opContractsOverride: {
+        l1: {
+          AddressManager: ethers.constants.AddressZero,
+          L1CrossDomainMessenger: '0x9338F298F29D3918D5D1Feb209aeB9915CC96333',
+          L1StandardBridge: '0xDeDa8D3CCf044fE2A16217846B6e1f1cfD8e122f',
+          StateCommitmentChain: ethers.constants.AddressZero,
+          BondManager: ethers.constants.AddressZero,
+          CanonicalTransactionChain: ethers.constants.AddressZero,
+          OptimismPortal: '0x2757E4430e694F27b73EC9C02257cab3a498C8C5',
+          L2OutputOracle: '0x311fF72DfE214ADF97618DD2E731637E8F41bD8c',
+        },
+        l2: DEFAULT_L2_CONTRACT_ADDRESSES
+      }
+    },
     opMainnetNative: {
       url: process.env.OPTIMISM_MAINNET_RPC_URL || "https://mainnet.optimism.io",
       ethNetwork: process.env.MAINNET_RPC_URL || "[set MAINNET_RPC_URL]",
@@ -259,6 +309,17 @@ module.exports = {
       companionNetworks: {
         l1: "sepolia",
         proxy: "baseSepolia"
+      }
+    },
+    blastSepoliaNative: {
+      url: process.env.BLAST_SEPOLIA_RPC_URL || "https://sepolia.blast.io",
+      ethNetwork: process.env.SEPOLIA_RPC_URL || "[set SEPOLIA_RPC_URL]",
+      accounts: SEPOLIA_PRIVKEY.length ? [ SEPOLIA_PRIVKEY ] : [],
+      l2Native: true,
+      l2OutputOracle: "0x311fF72DfE214ADF97618DD2E731637E8F41bD8c",
+      companionNetworks: {
+        l1: "sepolia",
+        proxy: "blastSepolia"
       }
     },
   },

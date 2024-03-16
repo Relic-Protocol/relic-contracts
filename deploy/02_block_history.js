@@ -1,33 +1,82 @@
 const { config, companionNetworks, network } = require("hardhat");
 const { getMerkleRootsSlot } = require("../utils/slots");
-const { getL1Contract, getMessengerName } = require("../utils/importL2")
+const { getMessengerName } = require("../utils/importL2");
+const { getL1Contract } = require("../utils/network");
 
 module.exports = async ({getNamedAccounts, deployments}) => {
     const {deploy} = deployments;
     const {deployer} = await getNamedAccounts();
     const Reliquary = await deployments.get("Reliquary");
+    let skipIfAlreadyDeployed = true;
     if (network.config.bridged === true) {
         if (network.config.zksync === true) {
-            const messenger = await companionNetworks['l1'].deployments.get("ZkSyncBlockHashMessenger")
-            const l1BlockHistory = await companionNetworks["l1"].deployments.get("BlockHistory")
+            const messenger = await getL1Contract(getMessengerName())
+            const l1BlockHistory = await companionNetworks["l1"].deployments.get("LegacyBlockHistory")
             const merkleRootsSlot = getMerkleRootsSlot(l1BlockHistory)
             await deploy("BlockHistory", {
                 contract: "ZkSyncProxyBlockHistory",
                 from: deployer,
                 args: [Reliquary.address, messenger.address, l1BlockHistory.address, merkleRootsSlot],
                 log: true,
-                skipIfAlreadyDeployed: true,
+                skipIfAlreadyDeployed,
+            });
+
+            let legacyBlockHistory = await deployments.get("BlockHistory")
+            if (legacyBlockHistory.devdoc.title.includes("Beacon")) {
+                legacyBlockHistory = await deployments.get("LegacyBlockHistory")
+            } else {
+                deployments.save("LegacyBlockHistory", legacyBlockHistory);
+            }
+
+            let l1NetworkName = await companionNetworks["l1"].deployments.getNetworkName();
+            let l1NetworkConfig = config.networks[l1NetworkName];
+            await deploy("BlockHistory", {
+                contract: "ZkSyncProxyBeaconBlockHistory",
+                from: deployer,
+                args: [
+                    messenger.address,
+                    Reliquary.address,
+                    legacyBlockHistory.address,
+                    l1NetworkConfig.capellaSlot,
+                    l1NetworkConfig.denebSlot,
+                    l1NetworkConfig.upgradeBlock
+                ],
+                log: true,
             });
         } else if (network.config.optimism === true) {
             const messenger = await getL1Contract(getMessengerName())
-            const l1BlockHistory = await companionNetworks["l1"].deployments.get("BlockHistory")
+            const l1BlockHistory = await companionNetworks["l1"].deployments.get("LegacyBlockHistory")
             const merkleRootsSlot = getMerkleRootsSlot(l1BlockHistory)
             await deploy("BlockHistory", {
                 contract: "OptimismProxyBlockHistory",
                 from: deployer,
                 args: [Reliquary.address, messenger.address, l1BlockHistory.address, merkleRootsSlot],
                 log: true,
-                skipIfAlreadyDeployed: true,
+                skipIfAlreadyDeployed,
+            });
+
+            // save and/or rename the BlockHistory deployment as LegacyBlockHistory
+            let legacyBlockHistory = await deployments.get("BlockHistory")
+            if (legacyBlockHistory.devdoc.title.includes("Beacon")) {
+                legacyBlockHistory = await deployments.get("LegacyBlockHistory")
+            } else {
+                deployments.save("LegacyBlockHistory", legacyBlockHistory);
+            }
+
+            let l1NetworkName = await companionNetworks["l1"].deployments.getNetworkName();
+            let l1NetworkConfig = config.networks[l1NetworkName];
+            await deploy("BlockHistory", {
+                contract: "OptimismProxyBeaconBlockHistory",
+                from: deployer,
+                args: [
+                    messenger.address,
+                    Reliquary.address,
+                    legacyBlockHistory.address,
+                    l1NetworkConfig.capellaSlot,
+                    l1NetworkConfig.denebSlot,
+                    l1NetworkConfig.upgradeBlock
+                ],
+                log: true,
             });
         }
     } else if (network.config.l2Native === true) {
@@ -79,7 +128,7 @@ module.exports = async ({getNamedAccounts, deployments}) => {
                 finalizationPeriodSeconds
             ],
             log: true,
-            skipIfAlreadyDeployed: true,
+            skipIfAlreadyDeployed,
         });
     } else {
         const sizes = config.relic.vkSizes;
@@ -90,7 +139,28 @@ module.exports = async ({getNamedAccounts, deployments}) => {
             from: deployer,
             args: [sizes, verifiers, Reliquary.address],
             log: true,
-            skipIfAlreadyDeployed: true,
+            skipIfAlreadyDeployed,
+        });
+
+        let legacyBlockHistory = await deployments.get("BlockHistory")
+        if (legacyBlockHistory.devdoc.title.includes("Beacon")) {
+            blockHistory = await deployments.get("LegacyBlockHistory")
+        } else {
+            deployments.save("LegacyBlockHistory", legacyBlockHistory);
+        }
+
+        await deploy("BlockHistory", {
+            contract: "BeaconBlockHistory",
+            from: deployer,
+            args: [
+                Reliquary.address,
+                legacyBlockHistory.address,
+                network.config.beaconOracleContract,
+                network.config.capellaSlot,
+                network.config.denebSlot,
+                network.config.upgradeBlock
+            ],
+            log: true,
         });
     }
 };

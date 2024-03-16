@@ -10,14 +10,15 @@ module.exports = async ({getNamedAccounts, deployments}) => {
     const blockHistory = await ethers.getContract("BlockHistory");
 
     const portal = config.networks[
-        companionNetworks["optimism"].deployments.getNetworkName()
+        companionNetworks["blast"].deployments.getNetworkName()
     ].portal
-    await deploy("OptimismBlockHashMessenger", {
+    await deploy("BlastBlockHashMessenger", {
+        contract: "OptimismBlockHashMessenger",
         from: deployer,
         args: [reliquary.address, blockHistory.address, portal],
         log: true,
     });
 };
 
-module.exports.tags = ["OptimismBlockHashMessenger"];
+module.exports.tags = ["BlastBlockHashMessenger"];
 module.exports.dependencies = ["Reliquary", "BlockHistory"];

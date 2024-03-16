@@ -17,7 +17,6 @@ module.exports = async ({getNamedAccounts, deployments}) => {
         from: deployer,
         args: [reliquary.address, blockHistory.address, portal],
         log: true,
-        skipIfAlreadyDeployed: true,
     });
 };
 

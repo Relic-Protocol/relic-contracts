@@ -153,12 +153,25 @@ async function getAuxRoot(startBlock, endBlock) {
     return proof.inputs[12];
 }
 
+async function getVerifiers() {
+    const sizes = config.relic.vkSizes;
+    let verifiers = [];
+    for (var i = 0; i < sizes.length; i++) {
+        let vkRaw = readFileSync(`test/data/rendered-vk-outer-${sizes[i] / 16}`);
+        const [vk] = defaultAbiCoder.decode(["uint256[35]"], vkRaw);
+        const Verifier = await ethers.getContractFactory("contracts/Verifier.yul:Verifier");
+        const verifier = await Verifier.deploy(vk);
+        await verifier.deployed();
+        verifiers.push(verifier.address);
+    }
+    return { sizes, verifiers }
+}
+
 describe("AuxRoots", function () {
     it("test blockHistory", async function () {
         const AuxRootTest = await ethers.getContractFactory("AuxRootTest");
         const auxRootTest = await AuxRootTest.deploy();
         await auxRootTest.deployed();
-
 
         const l1 = await auxRootTest.auxRoot([ZERO_HASH, ZERO_HASH]);
         const l2 = await auxRootTest.auxRoot([l1, l1]);
@@ -170,20 +183,11 @@ describe("AuxRoots", function () {
 // must run first because we rely on the hardhat fork block being recent
 describe("Blocks", function () {
     async function fixture(_wallets, _provider) {
-        const sizes = config.relic.vkSizes;
-        let verifiers = [];
-        for (var i = 0; i < sizes.length; i++) {
-            let vkRaw = readFileSync(`test/data/rendered-vk-outer-${sizes[i] / 16}`);
-            const [vk] = defaultAbiCoder.decode(["uint256[35]"], vkRaw);
-            const Verifier = await ethers.getContractFactory("contracts/Verifier.yul:Verifier");
-            const verifier = await Verifier.deploy(vk);
-            await verifier.deployed();
-            verifiers.push(verifier.address);
-        }
+        const { sizes, verifiers } = await getVerifiers();
 
         const BlockHistory = await ethers.getContractFactory("BlockHistoryForTesting");
         const blockHistory = await BlockHistory.deploy(sizes, verifiers, ZERO_ADDR);
-        await blockHistory.deployed();;
+        await blockHistory.deployed();
 
         const tx = await blockHistory.setSigner(ZERO_ADDR);
         await tx.wait();

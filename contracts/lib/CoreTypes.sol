@@ -28,6 +28,9 @@ library CoreTypes {
         bytes32 MixHash;
         uint256 BaseFee;
         bytes32 WithdrawalsHash;
+        uint256 BlobGasUsed;
+        uint256 ExcessBlobGas;
+        bytes32 ParentBeaconBlockRoot;
     }
 
     struct AccountData {
@@ -107,6 +110,22 @@ library CoreTypes {
 
         if (header.length > 0) {
             (data.WithdrawalsHash, offset) = parseHash(header); // WithdrawalsHash
+            header = header.suffix(offset);
+        }
+
+        if (header.length > 0) {
+            (data.BlobGasUsed, offset) = RLP.parseUint(header); // BlobGasUsed
+            header = header.suffix(offset);
+        }
+
+        if (header.length > 0) {
+            (data.ExcessBlobGas, offset) = RLP.parseUint(header); // ExcessBlobGas
+            header = header.suffix(offset);
+        }
+
+        if (header.length > 0) {
+            (data.ParentBeaconBlockRoot, offset) = parseHash(header); // ParentBeaconBlockRoot
+            header = header.suffix(offset);
         }
     }
 

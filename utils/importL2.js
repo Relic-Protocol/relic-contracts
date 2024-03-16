@@ -6,8 +6,7 @@ const { getMerkleRootsSlot } = require("./slots")
 const { getGasOptions } = require("./gas")
 const {
   getL1Provider,
-  getSigner,
-  getProxyContract,
+  getLogs,
   getL1Contract,
   getMessengerName,
   patchProviderPolling
@@ -53,6 +52,7 @@ async function getMessengerParams(blockNum, blockHash) {
 
 async function commitCurrentL1BlockHash(minBlockNumber) {
   if (network.config.optimism !== true) throw Error("incompatible network")
+  // TODO: parameterize which BlockHistory to commit to
   const l2BlockHistory = await ethers.getContract("BlockHistory")
   patchProviderPolling(l2BlockHistory.provider)
 
@@ -70,7 +70,11 @@ async function commitCurrentL1BlockHash(minBlockNumber) {
 
   const tx = await l2BlockHistory.commitCurrentL1BlockHash(getGasOptions())
   console.log(`committing current L1 block in tx ${tx.hash}...`)
-  await tx.wait()
+  const receipt = await tx.wait()
+  const parsed = l2BlockHistory.interface.parseLog(receipt.logs[0])
+  // argument name depends on version
+  const result = parsed.args.number || parsed.args.blockNum
+  return result.toNumber()
 }
 
 async function sendBlockHash(blockNum) {
@@ -84,7 +88,7 @@ async function sendBlockHash(blockNum) {
   const blockHash = await l1Provider.getBlock(blockNum).then(b => b.hash)
 
   const relic = await RelicClient.fromProvider(l1Provider)
-  const { blockProof } = await relic.api.blockProof(blockHash)
+  const blockProof = blockNum > await l1Provider.getBlockNumber() - 200 ? "0x" : await relic.api.blockProof(blockHash).then(p => p.blockProof)
 
   const { params, l2Fee } = await getMessengerParams(blockNum, blockHash)
   const tx = await messenger.sendBlockHash(
@@ -93,19 +97,20 @@ async function sendBlockHash(blockNum) {
     blockNum,
     blockHash,
     blockProof,
-    { ...getGasOptions(), gasLimit: 1000000, value: l2Fee }
+    { ...getGasOptions(), value: l2Fee }
   )
 
   console.log(`waiting for L1 tx: ${tx.hash}`)
   await tx.wait()
   console.log(`waiting for L2 tx...`)
   await waitForTrustedImport(blockHash)
+  console.log("l2 tx completed")
 }
 
-const MAX_IMPORT_SIZE = 32
+const MAX_IMPORT_SIZE = 240
 
 async function proxyImport(blockHistory, relic, block, index, numRoots) {
-  const l1BlockHistory = await companionNetworks['l1'].deployments.get("BlockHistory")
+  const l1BlockHistory = await companionNetworks['l1'].deployments.get("LegacyBlockHistory")
   const merkleRootsSlot = getMerkleRootsSlot(l1BlockHistory)
   const account = l1BlockHistory.address
   const slots = [...new Array(numRoots).keys()].map(i => relicUtils.mapElemSlot(merkleRootsSlot, index + i))
@@ -158,7 +163,7 @@ async function proxyImport(blockHistory, relic, block, index, numRoots) {
 }
 
 async function importMerkleRoots(blockNum, index, numRoots) {
-  const blockHistory = await ethers.getContract("BlockHistory")
+  const blockHistory = await ethers.getContract("LegacyBlockHistory")
 
   const l1Provider = getL1Provider()
   const relic = await RelicClient.fromProvider(l1Provider)
@@ -172,26 +177,16 @@ async function importMerkleRoots(blockNum, index, numRoots) {
 
 async function lastImportedRoot(blockHistory) {
   const filter = blockHistory.filters.ImportMerkleRoot()
-  let logs = null
-  while (logs === null) {
-    try {
-      logs = await blockHistory.queryFilter(filter)
-    } catch (e) {
-      // ProviderError: no backends available for method
-      if (e.code !== -32011) {
-        throw e;
-      }
-    }
-  }
-  const index = logs.length > 0 ? logs[logs.length - 1].args.index.toNumber() : -1
+  let logs = await getLogs(blockHistory.provider, filter)
+  const index = logs.length > 0 ? ethers.BigNumber.from(logs[logs.length - 1].topics[1]).toNumber() : -1
   const blockNum = logs.length > 0 ? logs[logs.length - 1].blockNumber : -1
   return { index, blockNum }
 }
 
 async function waitForL1Update() {
   if (network.config.bridged !== true) throw Error("not on bridged network")
-  const l2BlockHistory = await ethers.getContract("BlockHistory")
-  const l1BlockHistory = await getL1Contract("BlockHistory")
+  const l2BlockHistory = await ethers.getContract("LegacyBlockHistory")
+  const l1BlockHistory = await getL1Contract("LegacyBlockHistory")
   patchProviderPolling(l1BlockHistory.provider);
   patchProviderPolling(l2BlockHistory.provider);
 

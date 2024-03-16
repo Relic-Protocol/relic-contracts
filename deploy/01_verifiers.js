@@ -31,7 +31,6 @@ module.exports = async ({getNamedAccounts, deployments}) => {
             from: deployer,
             args: [vk],
             log: true,
-            skipIfAlreadyDeployed: true,
         });
     }
 };

@@ -11,6 +11,21 @@ pragma solidity >=0.8.0;
  */
 library MerkleTree {
     /**
+     * @notice performs one merkle combination of two node hashes
+     */
+    function combine(bytes32 left, bytes32 right) internal view returns (bytes32 result) {
+        assembly {
+            mstore(0, left)
+            mstore(0x20, right)
+            // compute sha256
+            if iszero(staticcall(gas(), 0x2, 0x0, 0x40, 0x0, 0x20)) {
+                revert(0, 0)
+            }
+            result := mload(0)
+        }
+    }
+
+    /**
      * @notice computes a SHA256 merkle root of the provided hashes, in place
      * @param temp the mutable array of hashes
      * @return the merkle root hash
@@ -46,28 +61,27 @@ library MerkleTree {
     }
 
     /**
-     * @notice check if a hash is in the merkle tree for rootHash
+     * @notice compute the root of the merkle tree according to the proof
      * @param index the index of the node to check
-     * @param hash the hash to check
+     * @param leaf the leaf to check
      * @param proofHashes the proof, i.e. the sequence of siblings from the
      *        node to root
      */
     function proofRoot(
         uint256 index,
-        bytes32 hash,
-        bytes32[] memory proofHashes
+        bytes32 leaf,
+        bytes32[] calldata proofHashes
     ) internal view returns (bytes32 result) {
         assembly {
-            result := hash
-            let length := mload(proofHashes)
-            let start := add(proofHashes, 0x20)
-            let end := add(start, mul(length, 0x20))
+            result := leaf
+            let start := proofHashes.offset
+            let end := add(start, mul(proofHashes.length, 0x20))
             for {
                 let ptr := start
             } lt(ptr, end) {
                 ptr := add(ptr, 0x20)
             } {
-                let proofHash := mload(ptr)
+                let proofHash := calldataload(ptr)
 
                 // use scratch space (0x0 - 0x40) for hash input
                 switch and(index, 1)
@@ -89,6 +103,43 @@ library MerkleTree {
                 index := shr(1, index)
             }
         }
+        require(index == 0, "invalid index for proof");
+    }
+
+    /**
+     * @notice compute the root of the merkle tree containing the given leaf
+     *         at index 0 and default values for all other leaves
+     * @param depth the depth of the tree
+     * @param leaf the non-default leaf
+     * @param defaultLeaf the default leaf for all other positions
+     */
+    function rootWithDefault(
+        uint256 depth,
+        bytes32 leaf,
+        bytes32 defaultLeaf
+    ) internal view returns (bytes32 result) {
+        assembly {
+            result := leaf
+            // the default value will live at 0x20 and be updated each iteration
+            mstore(0x20, defaultLeaf)
+            for { } depth { depth := sub(depth, 1) } {
+                // compute sha256 of result || default
+                mstore(0x0, result)
+                if iszero(staticcall(gas(), 0x2, 0x0, 0x40, 0x0, 0x20)) {
+                    revert(0, 0)
+                }
+                result := mload(0x0)
+                if iszero(depth) {
+                    break
+                }
+
+                // compute sha256 of default || default
+                mstore(0x0, mload(0x20))
+                if iszero(staticcall(gas(), 0x2, 0x0, 0x40, 0x20, 0x20)) {
+                    revert(0, 0)
+                }
+            }
+        }
     }
 
     /**
@@ -103,7 +154,7 @@ library MerkleTree {
         bytes32 rootHash,
         uint256 index,
         bytes32 hash,
-        bytes32[] memory proofHashes
+        bytes32[] calldata proofHashes
     ) internal view returns (bool result) {
         return rootHash == proofRoot(index, hash, proofHashes);
     }

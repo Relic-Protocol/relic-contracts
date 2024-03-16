@@ -4,7 +4,7 @@
 
 pragma solidity >=0.8.0;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
 import "./provers/StateVerifier.sol";
 import "./lib/CoreTypes.sol";
@@ -23,7 +23,9 @@ import "./interfaces/IRecursiveVerifier.sol";
  * @dev On L2s, these L1 block hashes are trustlessly sent from the L1 itself.
  *      Hence on L2s we inherit the fully trustlessness of the L1 BlockHistory.
  */
-contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
+contract ProxyBlockHistory is AccessControl, StateVerifier, IProxyBlockHistory {
+    bytes32 public constant QUERY_ROLE = keccak256("QUERY_ROLE");
+
     // depth of the merkle trees whose roots we store in storage
     uint256 private constant MERKLE_TREE_DEPTH = 13;
     uint256 private constant BLOCKS_PER_CHUNK = 1 << MERKLE_TREE_DEPTH;
@@ -45,6 +47,7 @@ contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
 
     /// @dev merkle roots of block chunks, proven via storage proofs of the L1
     mapping(uint256 => bytes32) private merkleRoots;
+
 
     event TrustedBlockHash(uint256 number, bytes32 blockHash);
 
@@ -70,7 +73,9 @@ contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
         address _messenger,
         address _l1BlockHistory,
         bytes32 _merkleRootsSlot
-    ) Ownable() StateVerifier(address(this), IReliquary(_reliquary)) {
+    ) StateVerifier(address(this), IReliquary(_reliquary)) {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(QUERY_ROLE, msg.sender);
         reliquary = _reliquary;
         messenger = _messenger;
         l1BlockHistory = _l1BlockHistory;
@@ -222,7 +227,7 @@ contract ProxyBlockHistory is Ownable, StateVerifier, IProxyBlockHistory {
         uint256 num,
         bytes calldata proof
     ) external view returns (bool) {
-        require(msg.sender == reliquary || msg.sender == owner());
+        require(msg.sender == reliquary || hasRole(QUERY_ROLE, msg.sender));
         return _validBlockHash(hash, num, proof);
     }
 

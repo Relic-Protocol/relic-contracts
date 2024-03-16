@@ -88,6 +88,15 @@ function headerRlp(header) {
     if (header.withdrawalsRoot) {
         list.push(header.withdrawalsRoot);
     }
+    if (header.blobGasUsed) {
+        list.push(header.blobGasUsed);
+    }
+    if (header.excessBlobGas) {
+        list.push(header.excessBlobGas);
+    }
+    if (header.parentBeaconBlockRoot) {
+        list.push(header.parentBeaconBlockRoot);
+    }
 
     list = list.map((v) => {
         if (v == "0x0") {

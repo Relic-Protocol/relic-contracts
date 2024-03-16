@@ -1,29 +1,10 @@
 const { ethers } = require("hardhat")
-const { getL1Provider, patchProviderPolling } = require("./network")
+const { getLogs, getL1Provider, patchProviderPolling, slotToTimestamp } = require("./network")
 
 const NEGATIVE_ONE = ethers.BigNumber.from(-1)
 
 function max(vals) {
     return vals.reduce((l, r) => l.gt(r) ? l : r)
-}
-
-async function getLogs(provider, filter) {
-    filter = {
-        ...filter,
-        fromBlock: filter.fromBlock || 0
-    }
-    while (true) {
-        try {
-            logs = await provider.getLogs(filter)
-        } catch (e) {
-            // ProviderError: no backends available for method
-            if (e.code !== -32011) {
-                throw e;
-            }
-            continue
-        }
-        return logs
-    }
 }
 
 async function getLastMerkleRootBlock(blockHistory) {
@@ -42,6 +23,28 @@ async function getLastMerkleRootBlock(blockHistory) {
         return rootIdx.add(1).mul(8192).sub(1)
     })
     return max(vals)
+}
+
+async function getLastSummaryBlock(blockHistory) {
+  if (!blockHistory.filters.ImportBlockSummary) {
+    return NEGATIVE_ONE
+  }
+  const logs = await getLogs(
+    blockHistory.provider,
+    blockHistory.filters.ImportBlockSummary()
+  )
+  if (logs.length == 0) {
+    return NEGATIVE_ONE
+  }
+  const vals = logs.map((l) => {
+    const slot = ethers.BigNumber.from(logs[logs.length - 1].topics[1])
+    return slot.sub(1)
+  })
+  const maxSlot = max(vals)
+  const { chainId } = await getL1Provider().getNetwork()
+  const maxTimestamp = slotToTimestamp(maxSlot.toNumber(), chainId)
+  const maxBlock = await blockForTimestamp(getL1Provider(), maxTimestamp)
+  return ethers.BigNumber.from(maxBlock.number)
 }
 
 async function getLastTrustedBlock(blockHistory) {
@@ -83,8 +86,14 @@ async function getLastPrecomiitedBlock(blockHistory) {
 }
 
 async function getLastVerifiableBlock(blockHistory) {
+    let legacy = null;
+    if (blockHistory.preDencunBlockHistory) {
+      legacy = await blockHistory.preDencunBlockHistory()
+    }
     const vals = await Promise.all([
+        legacy ? getLastVerifiableBlock(legacy): NEGATIVE_ONE,
         getLastMerkleRootBlock(blockHistory),
+        getLastSummaryBlock(blockHistory),
         getLastTrustedBlock(blockHistory),
         getLastPrecomiitedBlock(blockHistory)
     ])
@@ -92,22 +101,34 @@ async function getLastVerifiableBlock(blockHistory) {
     return max(vals)
 }
 
-async function findTrustedBlockNumber(minBlockNum) {
+async function findImportedBlockNumber(minBlockNum) {
   const l2BlockHistory = await ethers.getContract("BlockHistory")
   patchProviderPolling(l2BlockHistory.provider)
-  const logs = await getLogs(
-    l2BlockHistory.provider,
-    l2BlockHistory.filters.TrustedBlockHash()
-  )
-  for (const log of logs) {
-    const parsed = l2BlockHistory.interface.parseLog(log)
-    if (parsed.args.number.toNumber() > minBlockNum) {
-      return parsed.args.number.toNumber()
+  if (l2BlockHistory.filters.TrustedBlockHash) {
+    const logs = await getLogs(
+      l2BlockHistory.provider,
+      l2BlockHistory.filters.TrustedBlockHash()
+    )
+    for (const log of logs) {
+      const parsed = l2BlockHistory.interface.parseLog(log)
+      if (parsed.args.number.toNumber() >= minBlockNum) {
+        return parsed.args.number.toNumber()
+      }
+    }
+  } else if (l2BlockHistory.filters.PrecomittedBlock) {
+    const logs = await getLogs(
+      l2BlockHistory.provider,
+      l2BlockHistory.filters.PrecomittedBlock()
+    )
+    for (const log of logs) {
+      const parsed = l2BlockHistory.interface.parseLog(log)
+      if (parsed.args.blockNum.toNumber() >= minBlockNum) {
+        return parsed.args.blockNum.toNumber()
+      }
     }
   }
   return null
 }
-
 
 async function blockForTimestamp(provider, timestamp) {
   const current = await provider.getBlock('latest')
@@ -140,34 +161,34 @@ async function waitForTrustedImport(block) {
     proxyBlockHistory.provider,
     header.timestamp
   ).then((b) => b.number)
-  const filter = proxyBlockHistory.filters.TrustedBlockHash()
-  const isTargetHash = (hash) => {
-    return hash == header.hash
-  }
-  return new Promise(async (res) => {
-    const listener = (_, blockHash) => {
-      if (isTargetHash(blockHash)) {
-        proxyBlockHistory.off(filter, listener)
-        res()
-      }
-    }
-    proxyBlockHistory.on(filter, listener)
-
+  const filter = proxyBlockHistory.filters.PrecomittedBlock(header.number)
+  while (true) {
     // query logs after setting up listener to avoid races
     const logs = await getLogs(proxyBlockHistory.provider, { ...filter, fromBlock })
-    const isTargetEvent = (log) => {
-      const { args } = proxyBlockHistory.interface.parseLog(log)
-      return isTargetHash(args.blockHash)
+    if (logs.length > 0) {
+      return
     }
-    if (logs.some(isTargetEvent)) {
-      proxyBlockHistory.off(filter, listener)
-      res()
-    }
-  })
+    await new Promise(res => setTimeout(res, 30000))
+  }
+}
+
+async function getLastCachedSummary() {
+  const proxyBlockHistory = await ethers.getContract("BlockHistory")
+  patchProviderPolling(proxyBlockHistory.provider)
+  const logs = await getLogs(
+    proxyBlockHistory.provider,
+    proxyBlockHistory.filters.ImportBlockSummary()
+  )
+  if (logs.length == 0) {
+    return NEGATIVE_ONE
+  }
+  return max(logs.map(log => ethers.BigNumber.from(log.topics[1])))
 }
 
 module.exports = {
+  blockForTimestamp,
   getLastVerifiableBlock,
-  findTrustedBlockNumber,
-  waitForTrustedImport
+  getLastCachedSummary,
+  findImportedBlockNumber,
+  waitForTrustedImport,
 }
